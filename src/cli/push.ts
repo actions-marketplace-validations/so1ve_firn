@@ -31,6 +31,9 @@ const execFileAsync = promisify(execFile);
 // Keep each commit batch safely below Cloudflare Workers' 50-subrequest limit
 // (1 OCI token exchange + 2 GHCR verification requests per entry).
 const COMMIT_BATCH_SIZE = 15;
+// GitHub Actions OIDC JWTs and GHCR bearer tokens expire after 5 minutes;
+// refresh ahead of expiry so large multi-batch uploads never fail mid-flight.
+const TOKEN_REFRESH_MS = 3 * 60 * 1000;
 
 export interface PushOptions {
   server: string;
@@ -62,8 +65,8 @@ interface RawPathInfo {
 }
 
 type AuthMode =
-  | { kind: "manual"; bearer: string }
-  | { kind: "oidc"; jwt: string; githubToken: string };
+  | { kind: "manual"; getBearer: () => Promise<string> }
+  | { kind: "oidc"; getBearer: () => Promise<string>; githubToken: string };
 
 interface DumpedNar {
   compressed: Uint8Array;
@@ -140,12 +143,61 @@ async function collectInputPaths(options: PushOptions): Promise<string[]> {
   return [...new Set(resolved)].sort();
 }
 
-async function resolveAuth(
-  serverUrl: string,
-  options: PushOptions,
-): Promise<AuthMode> {
+function createCachedToken(
+  fetchToken: () => Promise<string>,
+  initial?: string,
+): () => Promise<string> {
+  let cached = initial ?? "";
+  let issuedAt = initial ? Date.now() : 0;
+  let inflight: Promise<string> | null = null;
+
+  return async () => {
+    if (cached && Date.now() - issuedAt < TOKEN_REFRESH_MS) {
+      return cached;
+    }
+    inflight ??= fetchToken()
+      .then((token) => {
+        cached = token;
+        issuedAt = Date.now();
+
+        return token;
+      })
+      .finally(() => {
+        inflight = null;
+      });
+
+    return inflight;
+  };
+}
+
+async function requestOidcJwt(
+  requestUrl: string,
+  requestToken: string,
+  audience: string,
+): Promise<string> {
+  const separator = requestUrl.includes("?") ? "&" : "?";
+  const fullUrl = `${requestUrl}${separator}audience=${encodeURIComponent(audience)}`;
+  const response = await fetch(fullUrl, {
+    headers: { Authorization: `Bearer ${requestToken}` },
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+
+    throw new Error(
+      `GitHub Actions OIDC token request failed (${response.status}): ${body}`,
+    );
+  }
+
+  const data = await response.json<{ value: string }>();
+
+  return data.value;
+}
+
+function resolveAuth(serverUrl: string, options: PushOptions): AuthMode {
   if (options.token) {
-    return { kind: "manual", bearer: options.token };
+    const bearer = options.token;
+
+    return { kind: "manual", getBearer: async () => bearer };
   }
 
   const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
@@ -163,22 +215,13 @@ async function resolveAuth(
     );
   }
 
-  const separator = requestUrl.includes("?") ? "&" : "?";
-  const fullUrl = `${requestUrl}${separator}audience=${encodeURIComponent(serverUrl)}`;
-  const response = await fetch(fullUrl, {
-    headers: { Authorization: `Bearer ${requestToken}` },
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-
-    throw new Error(
-      `GitHub Actions OIDC token request failed (${response.status}): ${body}`,
-    );
-  }
-
-  const data = await response.json<{ value: string }>();
-
-  return { kind: "oidc", jwt: data.value, githubToken };
+  return {
+    kind: "oidc",
+    getBearer: createCachedToken(() =>
+      requestOidcJwt(requestUrl, requestToken, serverUrl),
+    ),
+    githubToken,
+  };
 }
 
 export class PushHttpError extends Error {
@@ -378,12 +421,11 @@ export async function runPush(options: PushOptions): Promise<void> {
   }
 
   const serverUrl = options.server.replace(/\/+$/, "");
-  const auth = await resolveAuth(serverUrl, options);
-  const authToken = auth.kind === "manual" ? auth.bearer : auth.jwt;
+  const auth = resolveAuth(serverUrl, options);
 
   const plan = await postJson<PlanResponse>(
     `${serverUrl}/api/v1/uploads/plan`,
-    authToken,
+    await auth.getBearer(),
     {
       ...(options.owner ? { owner: options.owner } : {}),
       store_paths: candidates.map((item) => item.path),
@@ -411,14 +453,32 @@ export async function runPush(options: PushOptions): Promise<void> {
   );
 
   const oci = new OciClient(plan.registry);
-  let pushToken: string;
+  let getPushToken: () => Promise<string>;
   if (plan.ghcr_token) {
-    pushToken = plan.ghcr_token;
+    getPushToken = createCachedToken(async () => {
+      const refreshed = await postJson<PlanResponse>(
+        `${serverUrl}/api/v1/uploads/plan`,
+        await auth.getBearer(),
+        {
+          ...(options.owner ? { owner: options.owner } : {}),
+          store_paths: [],
+        } satisfies PlanRequest,
+      );
+      if (!refreshed.ghcr_token) {
+        throw new Error(
+          "server did not return a scoped GHCR upload token for manual push",
+        );
+      }
+
+      return refreshed.ghcr_token;
+    }, plan.ghcr_token);
   } else if (auth.kind === "oidc") {
-    pushToken = await oci.exchangeToken(plan.ghcr_repository, "pull,push", [
-      "x-access-token",
-      auth.githubToken,
-    ]);
+    getPushToken = createCachedToken(() =>
+      oci.exchangeToken(plan.ghcr_repository, "pull,push", [
+        "x-access-token",
+        auth.githubToken,
+      ]),
+    );
   } else {
     throw new Error(
       "server did not return a scoped GHCR upload token for manual push",
@@ -441,6 +501,7 @@ export async function runPush(options: PushOptions): Promise<void> {
   for (let i = 0; i < missingInfos.length; i += COMMIT_BATCH_SIZE) {
     const batchIndex = Math.floor(i / COMMIT_BATCH_SIZE) + 1;
     const chunk = missingInfos.slice(i, i + COMMIT_BATCH_SIZE);
+    const pushToken = await getPushToken();
     const entries = await mapWithConcurrency(
       chunk,
       options.jobs,
@@ -465,7 +526,7 @@ export async function runPush(options: PushOptions): Promise<void> {
 
     const committed = await postJson<CommitResponse>(
       `${serverUrl}/api/v1/uploads/commit`,
-      authToken,
+      await auth.getBearer(),
       {
         ...(options.owner ? { owner: options.owner } : {}),
         entries,
