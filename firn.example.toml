@@ -1,0 +1,98 @@
+# Complete Firn configuration reference.
+# Fields marked (required) must be set; all other fields show their defaults
+# or are commented out when optional.
+
+# Socket address the HTTP server binds to.
+# Optional. Default: "127.0.0.1:8080"
+listen = "127.0.0.1:8080"
+
+# Path to the SQLite database storing narinfo metadata, GC state, and PR overlays.
+# Required. (In the NixOS module, defaults to "/var/lib/firn/state.db".)
+database_path = "/var/lib/firn/state.db"
+
+# Externally reachable HTTPS base URL of this Firn server.
+# Also used as the expected OIDC audience (`aud`) for GitHub Actions uploads.
+# Required.
+public_base_url = "https://cache.example.com"
+
+# GitHub App credentials.
+# Optional as a whole. Required if you want:
+#   - GC to delete unreferenced versions/packages from GHCR
+#   - Local `firn push --token` to exchange short-lived GHCR upload tokens
+#   - GitHub `pull_request` closed webhooks to clean up PR overlays immediately
+[github_app]
+# Numeric GitHub App ID. Required when [github_app] is present.
+app_id = 123456
+
+# Path to the GitHub App RSA private key (PEM). Required when [github_app] is present.
+private_key_file = "/run/secrets/github-app.pem"
+
+# Path to the HMAC-SHA256 webhook secret for POST /api/v1/webhooks/github.
+# Optional. Omit if you do not use GitHub webhooks.
+webhook_secret_file = "/run/secrets/github-webhook-secret"
+
+# Garbage collection thresholds. GC runs every 6 hours and on `firn gc`.
+# Optional as a whole.
+[gc]
+# Days without updates before an unclosed PR overlay is expired and removed.
+# Optional. Default: 3
+pr_ttl_days = 3
+
+# Days without downloads before an unreferenced main-cache path is evicted.
+# Transitive dependencies of retained paths are preserved.
+# Optional. Default: 15
+main_lru_days = 15
+
+# Cache owners. At least one [[owners]] entry is required.
+# Repeat [[owners]] to serve multiple GitHub users or organizations.
+[[owners]]
+# GitHub username or organization login, also used as the URL prefix `/<name>/`.
+# Allowed characters: ASCII letters, digits, '-', '_'.
+# Required.
+name = "so1ve"
+
+# Whether the GitHub owner is a personal account or an organization.
+# Controls whether GHCR GC calls `/users/<name>/...` or `/orgs/<name>/...`.
+# Optional. Values: "user" | "org". Default: "user"
+owner_type = "user"
+
+# Immutable numeric GitHub user or organization ID matched against OIDC claims
+# (`repository_owner_id`). Find it via `https://api.github.com/users/<name>`.
+# Required.
+github_owner_id = 58381667
+
+# Numeric GitHub App installation ID for this owner.
+# Optional. Required for GHCR GC deletion and local `firn push --token`.
+github_installation_id = 98765432
+
+# Path to the Nix Ed25519 secret key (`<name>:<base64>`) used to sign main-cache
+# narinfos (trusted refs and local manual pushes). Generate with `firn keygen`.
+# Required. Must differ from `pr_signing_key_file`.
+main_signing_key_file = "/run/secrets/so1ve-main.key"
+
+# Path to the Nix Ed25519 secret key used to sign PR overlay narinfos.
+# Required. Must differ from `main_signing_key_file`.
+pr_signing_key_file = "/run/secrets/so1ve-pr.key"
+
+# GHCR package name template for GitHub Actions uploads.
+# `{repo}` is replaced with the repository name and lowercased.
+# Optional. Default: "{repo}-cache"
+package_template = "{repo}-cache"
+
+# GHCR package name used for local `firn push --token` uploads (lowercased).
+# Optional. Default: "manual-cache"
+manual_push_package = "manual-cache"
+
+# Exact Git refs allowed to publish into the main cache via GitHub Actions OIDC.
+# Matched against the OIDC `ref` claim; GitHub branch protection rules are NOT required.
+# Optional. Default: ["refs/heads/main"]
+protected_refs = ["refs/heads/main"]
+
+# Repository allowlist (repository names without the `<owner>/` prefix) for OIDC uploads.
+# Optional. Default: [] (empty allows all repositories under this owner).
+allowed_repos = ["nur-packages", "latchshot"]
+
+# Path to a file listing static Bearer tokens for local `firn push --token`
+# (one token per line; empty lines and `#` comments are ignored).
+# Optional. Omit to disable manual local pushes for this owner.
+manual_tokens_file = "/run/secrets/so1ve-manual-tokens"

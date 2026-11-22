@@ -11,8 +11,10 @@ presigned CDN URLs, so NAR payloads do not pass through the Firn server.
 
 ### Signing keys
 
-Generate two Ed25519 key pairs per owner: one for protected branches (`main`)
-and one for pull request overlays.
+Generate two Ed25519 key pairs per owner: one for the main cache (default
+`refs/heads/main`, configurable via `protected_refs`) and one for pull request
+overlays. GitHub branch protection rules are not required—Firn matches the OIDC
+`ref` claim against `protected_refs`.
 
 ```sh
 firn keygen cache.example.com-1 -s main.key -p main.pub
@@ -21,32 +23,22 @@ firn keygen cache.example.com-pr-1 -s pr.key -p pr.pub
 
 ### Server configuration
 
+Minimal configuration:
+
 ```toml
-listen = "127.0.0.1:8080"
 database_path = "/var/lib/firn/state.db"
 public_base_url = "https://cache.example.com"
 
-[github_app]
-app_id = 123456
-private_key_file = "/run/secrets/github-app.pem"
-webhook_secret_file = "/run/secrets/github-webhook-secret"
-
-[gc]
-pr_ttl_days = 3
-main_lru_days = 15
-
 [[owners]]
 name = "so1ve"
-owner_type = "user"
 github_owner_id = 58381667
-github_installation_id = 98765432
-package_template = "{repo}-cache"
-manual_push_package = "manual-cache"
-allowed_repos = ["nur-packages", "latchshot"]
 main_signing_key_file = "/run/secrets/so1ve-main.key"
 pr_signing_key_file = "/run/secrets/so1ve-pr.key"
-manual_tokens_file = "/run/secrets/so1ve-manual-tokens"
 ```
+
+See [firn.example.toml](firn.example.toml) for the full configuration reference
+with every field, default value, and optional section (`[github_app]`, `[gc]`,
+`protected_refs`, `allowed_repos`, manual push tokens, etc.).
 
 Start the server:
 
@@ -106,10 +98,11 @@ steps:
   - run: nix build .#default --print-out-paths | firn push --server https://cache.example.com --stdin
 ```
 
-- Protected refs (`refs/heads/main` by default) write to the main cache and are
-  signed with `main_signing_key_file`.
+- Refs listed in `protected_refs` (`refs/heads/main` by default; GitHub branch
+  protection rules are not required) write to the main cache and are signed with
+  `main_signing_key_file`.
 - Internal `pull_request` workflows write to an isolated PR overlay signed with
-  `pr_signing_key_file`. `pull_request_target` and unprotected branch pushes are
+  `pr_signing_key_file`. `pull_request_target` and pushes to unlisted refs are
   rejected.
 - Paths already signed by `cache.nixos.org-1:` are skipped unless
   `--include-upstream` is passed.
