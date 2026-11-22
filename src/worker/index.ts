@@ -22,12 +22,23 @@ import {
 import { handleDashboard, handlePublicPaths } from "./routes/ui.ts";
 import { handleUploadCommit, handleUploadPlan } from "./routes/upload.ts";
 import { handleWebhook } from "./routes/webhook.ts";
+import { FAVICON_SVG } from "./ui/logo.ts";
 
 function createApp(): Hono<AppBindings> {
   const app = new Hono<AppBindings>();
 
   app.get("/healthz", (c) => c.text("ok\n"));
   app.get("/nix-cache-info", () => handleMainCacheInfo());
+  app.get(
+    "/favicon.svg",
+    () =>
+      new Response(FAVICON_SVG, {
+        headers: {
+          "Content-Type": "image/svg+xml; charset=utf-8",
+          "Cache-Control": "public, max-age=86400",
+        },
+      }),
+  );
 
   app.use("*", async (c, next) => {
     const config = await loadConfig(c.env);

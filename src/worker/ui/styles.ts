@@ -114,9 +114,16 @@ select:focus {
 
 .brand {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 0.625rem;
+  gap: 0.55rem;
+}
+
+.brand-mark {
+  display: block;
+  width: 22px;
+  height: 22px;
+  flex: none;
 }
 
 .brand h1 {

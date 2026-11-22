@@ -1,3 +1,5 @@
+<img src="assets/logo.svg" alt="Firn" width="56" height="56" />
+
 # Firn
 
 Stateful Nix binary cache backed by GHCR, running on Cloudflare Workers (Hono +

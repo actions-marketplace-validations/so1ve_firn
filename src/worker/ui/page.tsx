@@ -98,6 +98,7 @@ export function DashboardPage({ data }: { data: DashboardData }) {
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Firn - {host}</title>
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
         <style>{raw(STYLES)}</style>
       </head>
       <body>
@@ -105,6 +106,13 @@ export function DashboardPage({ data }: { data: DashboardData }) {
           <header class="head">
             <div class="head-top">
               <div class="brand">
+                <img
+                  class="brand-mark"
+                  src="/favicon.svg"
+                  alt=""
+                  width="22"
+                  height="22"
+                />
                 <h1>Firn</h1>
                 <span class="brand-url">{host}</span>
               </div>
