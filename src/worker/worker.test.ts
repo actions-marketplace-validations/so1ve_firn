@@ -15,6 +15,7 @@ import {
   unixNow,
   verifySignature,
 } from "../shared/nix-format.ts";
+import { OciClient } from "../shared/oci.ts";
 import type {
   AdminStatusResponse,
   CommitRequest,
@@ -912,5 +913,80 @@ describe("firn worker", () => {
     );
 
     expect(unknownOwnerRes.status).toBe(400);
+  });
+
+  it("retries OCI manifest pushes on GHCR 429 rate limits", async () => {
+    let manifestAttempts = 0;
+    let emptyConfigHeads = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const reqUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = (init?.method ?? "GET").toUpperCase();
+        const url = new URL(reqUrl);
+
+        if (method === "HEAD" && url.pathname.includes("/blobs/")) {
+          if (
+            url.pathname.endsWith(
+              "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            )
+          ) {
+            emptyConfigHeads += 1;
+          }
+
+          return new Response(null, { status: 200 });
+        }
+        if (method === "PUT" && url.pathname.includes("/manifests/")) {
+          manifestAttempts += 1;
+          if (manifestAttempts === 1) {
+            return Response.json(
+              {
+                errors: [
+                  {
+                    code: "TOOMANYREQUESTS",
+                    message: "retry-after: 2.565145ms, allowed: 2000/minute",
+                  },
+                ],
+              },
+              { status: 429 },
+            );
+          }
+
+          return new Response(null, {
+            status: 201,
+            headers: {
+              "docker-content-digest": `sha256:${"e".repeat(64)}`,
+            },
+          });
+        }
+
+        throw new Error(`unexpected ${method} ${reqUrl}`);
+      },
+    );
+
+    const oci = new OciClient("https://ghcr.mock");
+    const first = await oci.uploadNarBlob(
+      "so1ve/nur-packages-cache",
+      "tok",
+      new Uint8Array([1, 2, 3]),
+      "a".repeat(64),
+    );
+    const second = await oci.uploadNarBlob(
+      "so1ve/nur-packages-cache",
+      "tok",
+      new Uint8Array([4, 5, 6]),
+      "b".repeat(64),
+    );
+
+    expect(first).toBe(`sha256:${"e".repeat(64)}`);
+    expect(second).toBe(`sha256:${"e".repeat(64)}`);
+    expect(manifestAttempts).toBe(3);
+    expect(emptyConfigHeads).toBe(1);
   });
 });

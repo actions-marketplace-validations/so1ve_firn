@@ -9,6 +9,10 @@ const EMPTY_CONFIG_BYTES = new TextEncoder().encode("{}");
 const EMPTY_CONFIG_DIGEST =
   "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
 
+const MAX_RETRIES = 6;
+const BASE_RETRY_DELAY_MS = 200;
+const MAX_RETRY_DELAY_MS = 15_000;
+
 interface TokenResponse {
   token?: string;
   access_token?: string;
@@ -32,13 +36,85 @@ function resolveRelativeUrl(base: string, location: string): string {
   return new URL(location, base).toString();
 }
 
+const isRetryableStatus = (status: number): boolean =>
+  status === 408 ||
+  status === 429 ||
+  status === 500 ||
+  status === 502 ||
+  status === 503 ||
+  status === 504;
+
+function parseRetryDelayMs(
+  response: Response,
+  body: string,
+  attempt: number,
+): number {
+  const header = response.headers.get("retry-after");
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(Math.ceil(seconds * 1000), MAX_RETRY_DELAY_MS);
+    }
+    const dateMs = Date.parse(header) - Date.now();
+    if (Number.isFinite(dateMs) && dateMs > 0) {
+      return Math.min(dateMs, MAX_RETRY_DELAY_MS);
+    }
+  }
+
+  const ghcrMatch = /retry-after:\s*(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m)/i.exec(
+    body,
+  );
+  if (ghcrMatch) {
+    const amount = Number(ghcrMatch[1]);
+    const unit = ghcrMatch[2].toLowerCase();
+    const factor =
+      unit === "m"
+        ? 60_000
+        : unit === "s"
+          ? 1000
+          : unit === "ms"
+            ? 1
+            : unit === "us" || unit === "µs"
+              ? 0.001
+              : 0.000001;
+    const ms = Math.ceil(amount * factor);
+    if (Number.isFinite(ms) && ms > 0) {
+      return Math.min(ms + Math.floor(Math.random() * 150), MAX_RETRY_DELAY_MS);
+    }
+  }
+
+  const exp = Math.min(BASE_RETRY_DELAY_MS * 2 ** attempt, MAX_RETRY_DELAY_MS);
+  const jitter = Math.floor(Math.random() * Math.min(exp, 500));
+
+  return Math.min(exp + jitter, MAX_RETRY_DELAY_MS);
+}
+
+const sleep = async (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
 export class OciClient {
   readonly #registryUrl: string;
   readonly #service: string;
+  readonly #ensuredConfigRepos = new Map<string, Promise<void>>();
 
   constructor(registryUrl: string) {
     this.#registryUrl = registryUrl.replace(/\/+$/, "");
     this.#service = new URL(this.#registryUrl).host;
+  }
+
+  async #fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await fetch(url, init);
+      if (!isRetryableStatus(response.status) || attempt >= MAX_RETRIES) {
+        return response;
+      }
+
+      const body = await response.text().catch(() => "");
+      const delayMs = parseRetryDelayMs(response, body, attempt);
+      await sleep(delayMs);
+    }
   }
 
   public async exchangeToken(
@@ -56,7 +132,7 @@ export class OciClient {
       headers.Authorization = `Basic ${btoa(`${basicAuth[0]}:${basicAuth[1]}`)}`;
     }
 
-    const response = await fetch(url, { headers });
+    const response = await this.#fetchWithRetry(url, { headers });
     if (!response.ok) {
       const body = await response.text().catch(() => "");
 
@@ -79,10 +155,11 @@ export class OciClient {
     manifestDigest: string,
     blobDigestHex: string,
     expectedSize: number,
+    pullToken?: string,
   ): Promise<void> {
-    const token = await this.exchangeToken(repository, "pull");
+    const token = pullToken ?? (await this.exchangeToken(repository, "pull"));
     const manifestUrl = `${this.#registryUrl}/v2/${repository}/manifests/${manifestDigest}`;
-    const response = await fetch(manifestUrl, {
+    const response = await this.#fetchWithRetry(manifestUrl, {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: OCI_MANIFEST_MEDIA_TYPE,
@@ -110,7 +187,7 @@ export class OciClient {
     }
 
     const blobUrl = `${this.#registryUrl}/v2/${repository}/blobs/${expectedLayerDigest}`;
-    const head = await fetch(blobUrl, {
+    const head = await this.#fetchWithRetry(blobUrl, {
       method: "HEAD",
       headers: { Authorization: `Bearer ${token}` },
       redirect: "manual",
@@ -129,7 +206,7 @@ export class OciClient {
     const token = await this.exchangeToken(repository, "pull");
     const digest = `sha256:${blobDigestHex.toLowerCase()}`;
     const blobUrl = `${this.#registryUrl}/v2/${repository}/blobs/${digest}`;
-    const response = await fetch(blobUrl, {
+    const response = await this.#fetchWithRetry(blobUrl, {
       headers: { Authorization: `Bearer ${token}` },
       redirect: "manual",
     });
@@ -156,7 +233,7 @@ export class OciClient {
     digest: string,
   ): Promise<boolean> {
     const url = `${this.#registryUrl}/v2/${repository}/blobs/${digest}`;
-    const response = await fetch(url, {
+    const response = await this.#fetchWithRetry(url, {
       method: "HEAD",
       headers: { Authorization: `Bearer ${pushToken}` },
       redirect: "manual",
@@ -176,44 +253,78 @@ export class OciClient {
     }
 
     const startUrl = `${this.#registryUrl}/v2/${repository}/blobs/uploads/`;
-    const start = await fetch(startUrl, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${pushToken}`,
-        "Content-Length": "0",
-      },
-    });
-    if (start.status !== 202 && !start.ok) {
-      const body = await start.text().catch(() => "");
+    for (let attempt = 0; ; attempt += 1) {
+      const start = await this.#fetchWithRetry(startUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${pushToken}`,
+          "Content-Length": "0",
+        },
+      });
+      if (start.status !== 202 && !start.ok) {
+        const body = await start.text().catch(() => "");
 
-      throw new Error(
-        `failed to initiate blob upload to ${startUrl} (${start.status}): ${body}`,
+        throw new Error(
+          `failed to initiate blob upload to ${startUrl} (${start.status}): ${body}`,
+        );
+      }
+
+      const location = start.headers.get("location");
+      if (!location) {
+        throw new Error(
+          `blob upload response from ${startUrl} missing Location`,
+        );
+      }
+
+      const uploadUrl = new URL(
+        resolveRelativeUrl(this.#registryUrl, location),
       );
-    }
+      uploadUrl.searchParams.set("digest", digest);
 
-    const location = start.headers.get("location");
-    if (!location) {
-      throw new Error(`blob upload response from ${startUrl} missing Location`);
-    }
+      const put = await fetch(uploadUrl.toString(), {
+        method: "PUT",
+        headers: {
+          "Authorization": `Bearer ${pushToken}`,
+          "Content-Type": "application/octet-stream",
+        },
+        body: payload as BodyInit,
+      });
+      if (put.status === 201 || put.ok) {
+        return;
+      }
 
-    const uploadUrl = new URL(resolveRelativeUrl(this.#registryUrl, location));
-    uploadUrl.searchParams.set("digest", digest);
-
-    const put = await fetch(uploadUrl.toString(), {
-      method: "PUT",
-      headers: {
-        "Authorization": `Bearer ${pushToken}`,
-        "Content-Type": "application/octet-stream",
-      },
-      body: payload as BodyInit,
-    });
-    if (put.status !== 201 && !put.ok) {
       const body = await put.text().catch(() => "");
+      if (isRetryableStatus(put.status) && attempt < MAX_RETRIES) {
+        await sleep(parseRetryDelayMs(put, body, attempt));
+
+        continue;
+      }
 
       throw new Error(
         `failed to upload blob ${digest} to ${repository} (${put.status}): ${body}`,
       );
     }
+  }
+
+  async #ensureEmptyConfig(
+    repository: string,
+    pushToken: string,
+  ): Promise<void> {
+    let pending = this.#ensuredConfigRepos.get(repository);
+    if (!pending) {
+      pending = this.#putBlob(
+        repository,
+        pushToken,
+        EMPTY_CONFIG_DIGEST,
+        EMPTY_CONFIG_BYTES,
+      ).catch((error: unknown) => {
+        this.#ensuredConfigRepos.delete(repository);
+
+        throw error;
+      });
+      this.#ensuredConfigRepos.set(repository, pending);
+    }
+    await pending;
   }
 
   public async uploadNarBlob(
@@ -223,12 +334,7 @@ export class OciClient {
     blobDigestHex: string,
   ): Promise<string> {
     const blobDigest = `sha256:${blobDigestHex.toLowerCase()}`;
-    await this.#putBlob(
-      repository,
-      pushToken,
-      EMPTY_CONFIG_DIGEST,
-      EMPTY_CONFIG_BYTES,
-    );
+    await this.#ensureEmptyConfig(repository, pushToken);
     await this.#putBlob(repository, pushToken, blobDigest, payload);
 
     const manifestBytes = new TextEncoder().encode(
@@ -252,7 +358,7 @@ export class OciClient {
 
     const tag = `nar-${blobDigestHex.toLowerCase().slice(0, 32)}`;
     const manifestUrl = `${this.#registryUrl}/v2/${repository}/manifests/${tag}`;
-    const response = await fetch(manifestUrl, {
+    const response = await this.#fetchWithRetry(manifestUrl, {
       method: "PUT",
       headers: {
         "Authorization": `Bearer ${pushToken}`,

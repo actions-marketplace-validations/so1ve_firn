@@ -22,7 +22,9 @@ import type {
 import { err, formatBytes, out } from "./format.ts";
 
 const execFileAsync = promisify(execFile);
-const COMMIT_BATCH_SIZE = 50;
+// Keep each commit batch safely below Cloudflare Workers' 50-subrequest limit
+// (1 OCI token exchange + 2 GHCR verification requests per entry).
+const COMMIT_BATCH_SIZE = 15;
 
 export interface PushOptions {
   server: string;
@@ -396,42 +398,42 @@ export async function runPush(options: PushOptions): Promise<void> {
 
   let uploadedCount = 0;
   let uploadedBytes = 0;
-  const entries = await mapWithConcurrency(
-    missingInfos,
-    options.jobs,
-    async (info) => {
-      const entry = await uploadSinglePath(
-        oci,
-        plan.ghcr_repository,
-        pushToken,
-        info,
-        options.zstdLevel,
-      );
-      uploadedCount += 1;
-      uploadedBytes += entry.file_size;
-      const baseName = info.path.startsWith("/nix/store/")
-        ? info.path.slice("/nix/store/".length + 33)
-        : info.path;
-      console.error(
-        `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${baseName} ${err.dim(`(${formatBytes(entry.file_size)})`)}`,
-      );
-
-      return entry;
-    },
-  );
-
   let totalCommitted = 0;
   let lastScope = plan.scope;
   let lastOwner = plan.owner;
 
-  for (let i = 0; i < entries.length; i += COMMIT_BATCH_SIZE) {
-    const batch = entries.slice(i, i + COMMIT_BATCH_SIZE);
+  for (let i = 0; i < missingInfos.length; i += COMMIT_BATCH_SIZE) {
+    const chunk = missingInfos.slice(i, i + COMMIT_BATCH_SIZE);
+    const entries = await mapWithConcurrency(
+      chunk,
+      options.jobs,
+      async (info) => {
+        const entry = await uploadSinglePath(
+          oci,
+          plan.ghcr_repository,
+          pushToken,
+          info,
+          options.zstdLevel,
+        );
+        uploadedCount += 1;
+        uploadedBytes += entry.file_size;
+        const baseName = info.path.startsWith("/nix/store/")
+          ? info.path.slice("/nix/store/".length + 33)
+          : info.path;
+        console.error(
+          `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${baseName} ${err.dim(`(${formatBytes(entry.file_size)})`)}`,
+        );
+
+        return entry;
+      },
+    );
+
     const committed = await postJson<CommitResponse>(
       `${serverUrl}/api/v1/uploads/commit`,
       authToken,
       {
         ...(options.owner ? { owner: options.owner } : {}),
-        entries: batch,
+        entries,
       } satisfies CommitRequest,
     );
     totalCommitted += committed.committed;

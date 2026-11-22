@@ -246,6 +246,7 @@ async function issueScopedGhcrToken(
 async function validateAndSign(
   oci: OciClient,
   repository: string,
+  pullToken: string,
   config: LoadedConfig,
   auth: AuthenticatedUpload,
   entry: CommitEntry,
@@ -293,6 +294,7 @@ async function validateAndSign(
       manifestDigest,
       blobDigest,
       entry.file_size,
+      pullToken,
     );
   } catch (error) {
     throw new HttpError(
@@ -404,10 +406,13 @@ export async function handleUploadCommit(
     const repo = ghcrRepository(auth.owner.name, auth.ghcrPackage);
     const oci = new OciClient(config.registryUrl);
     const now = unixNow();
+    const entries = body.entries ?? [];
+    const pullToken =
+      entries.length > 0 ? await oci.exchangeToken(repo, "pull") : "";
 
     const records = await Promise.all(
-      (body.entries ?? []).map((entry) =>
-        validateAndSign(oci, repo, config, auth, entry, now),
+      entries.map((entry) =>
+        validateAndSign(oci, repo, pullToken, config, auth, entry, now),
       ),
     );
     const committed = await commitEntries(c.env.DB, records);
