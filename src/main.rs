@@ -24,14 +24,12 @@ use crate::firn::Firn;
 use crate::nix_format::SigningKeyPair;
 use crate::push::PushArgs;
 
+const DEFAULT_CONFIG_PATH: &str = "/etc/firn/config.toml";
+
 #[derive(Subcommand)]
 enum PrCommand {
     /// List active PR overlays and remaining TTL
     Ls {
-        /// Path to the TOML configuration file
-        #[arg(value_name = "CONFIG", env = "FIRN_CONFIG")]
-        config: PathBuf,
-
         /// Filter by owner name
         #[arg(long)]
         owner: Option<String>,
@@ -39,10 +37,6 @@ enum PrCommand {
 
     /// Delete a PR overlay immediately
     Rm {
-        /// Path to the TOML configuration file
-        #[arg(value_name = "CONFIG", env = "FIRN_CONFIG")]
-        config: PathBuf,
-
         /// Owner name
         owner: String,
 
@@ -57,28 +51,16 @@ enum PrCommand {
 #[derive(Subcommand)]
 enum Command {
     /// Run the Firn HTTP control-plane server
-    Serve {
-        /// Path to the TOML configuration file
-        #[arg(value_name = "CONFIG", env = "FIRN_CONFIG")]
-        config: PathBuf,
-    },
+    Serve,
 
     /// Push Nix store paths and their closures to a Firn server
     Push(PushArgs),
 
     /// Show owners, public keys, cache usage, and GC-blocked blobs
-    Status {
-        /// Path to the TOML configuration file
-        #[arg(value_name = "CONFIG", env = "FIRN_CONFIG")]
-        config: PathBuf,
-    },
+    Status,
 
     /// List cached store paths ordered by recent access
     Ls {
-        /// Path to the TOML configuration file
-        #[arg(value_name = "CONFIG", env = "FIRN_CONFIG")]
-        config: PathBuf,
-
         /// Filter by owner name
         #[arg(long)]
         owner: Option<String>,
@@ -115,10 +97,6 @@ enum Command {
 
     /// Run a single garbage collection pass
     Gc {
-        /// Path to the TOML configuration file
-        #[arg(value_name = "CONFIG", env = "FIRN_CONFIG")]
-        config: PathBuf,
-
         /// Report what would be deleted without mutating SQLite or GHCR
         #[arg(long)]
         dry_run: bool,
@@ -134,6 +112,17 @@ enum Command {
 #[derive(Parser)]
 #[command(version, about, arg_required_else_help = true)]
 struct Cli {
+    /// Path to the TOML configuration file
+    #[arg(
+        short,
+        long,
+        global = true,
+        env = "FIRN_CONFIG",
+        default_value = DEFAULT_CONFIG_PATH,
+        value_name = "FILE"
+    )]
+    config: PathBuf,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -182,32 +171,32 @@ async fn main() -> Result<()> {
         .with_writer(io::stderr)
         .init();
 
-    match Cli::parse().command {
-        Command::Serve { config } => Firn::open(&config)?.serve().await,
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Serve => Firn::open(&cli.config)?.serve().await,
         Command::Push(args) => push::run(args).await,
-        Command::Status { config } => Firn::open(&config)?.show_status(),
+        Command::Status => Firn::open(&cli.config)?.show_status(),
         Command::Ls {
-            config,
             owner,
             scope,
             limit,
-        } => Firn::open(&config)?.list_paths(owner.as_deref(), scope.as_deref(), limit),
+        } => Firn::open(&cli.config)?.list_paths(owner.as_deref(), scope.as_deref(), limit),
         Command::Pr { command } => match command {
-            PrCommand::Ls { config, owner } => Firn::open(&config)?.list_prs(owner.as_deref()),
+            PrCommand::Ls { owner } => Firn::open(&cli.config)?.list_prs(owner.as_deref()),
             PrCommand::Rm {
-                config,
                 owner,
                 repo,
                 number,
-            } => Firn::open(&config)?.remove_pr(&owner, &repo, number),
+            } => Firn::open(&cli.config)?.remove_pr(&owner, &repo, number),
         },
         Command::Keygen {
             name,
             secret_out,
             public_out,
         } => run_keygen(&name, secret_out.as_deref(), public_out.as_deref()),
-        Command::Gc { config, dry_run } => {
-            let report = Firn::open(&config)?.run_gc(dry_run).await?;
+        Command::Gc { dry_run } => {
+            let report = Firn::open(&cli.config)?.run_gc(dry_run).await?;
             println!(
                 "GC finished (dry_run={dry_run}): pr_paths_removed={}, main_paths_removed={}, blobs_deleted={}, blobs_protected={}, blobs_skipped={}, blob_errors={}",
                 report.pr_paths_removed,

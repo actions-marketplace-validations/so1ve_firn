@@ -53,6 +53,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    environment.etc."firn/config.toml".source = configFile;
+
     users.users.${cfg.user} = lib.mkIf (cfg.user == "firn") {
       isSystemUser = true;
       group = cfg.group;
@@ -75,7 +77,7 @@ in
         Group = cfg.group;
         StateDirectory = "firn";
         StateDirectoryMode = "0750";
-        ExecStart = "${lib.getExe cfg.package} serve ${configFile}";
+        ExecStart = "${lib.getExe cfg.package} serve --config ${configFile}";
         Restart = "on-failure";
         RestartSec = "5s";
         NoNewPrivileges = true;

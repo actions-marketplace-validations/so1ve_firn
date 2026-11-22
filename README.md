@@ -29,7 +29,7 @@ github_owner_id = 58381667
 Run directly, with Docker, or via the NixOS module (`inputs.firn.nixosModules.default`):
 
 ```sh
-firn serve /etc/firn/config.toml
+firn serve
 ```
 
 ```sh
@@ -65,7 +65,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v7
-  - uses: cachix/install-nix-action@v31
+  - uses: cachix/install-nix-action@v32
   - uses: so1ve/firn@main
     with:
       server: https://cache.example.com
@@ -92,14 +92,14 @@ firn push --server https://cache.example.com --token "$FIRN_TOKEN" ./result
 
 ## CLI
 
-Pass `CONFIG` as the first argument or set `FIRN_CONFIG` (logs via `RUST_LOG`):
+Defaults to `/etc/firn/config.toml` (override with `-c` / `--config` or `FIRN_CONFIG`; logs via `RUST_LOG`):
 
 ```sh
-firn status /etc/firn/config.toml
-firn ls /etc/firn/config.toml --limit 50
-firn pr ls /etc/firn/config.toml
-firn pr rm /etc/firn/config.toml so1ve latchshot 7
-firn gc /etc/firn/config.toml --dry-run
+firn status
+firn ls --limit 50
+firn pr ls
+firn pr rm so1ve latchshot 7
+firn gc --dry-run
 ```
 
 ## License
