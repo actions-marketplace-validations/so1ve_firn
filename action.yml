@@ -1,0 +1,50 @@
+name: Firn Nix Binary Cache
+description: Configure a Firn Nix binary cache and automatically push newly built store paths
+author: Ray (so1ve)
+
+inputs:
+  server:
+    description: Base URL of the Firn server (e.g. https://cache.so1ve.dev)
+    required: true
+  main-public-key:
+    description: Optional Nix public signing key for the main cache (fetched from /api/v1/public-keys if omitted)
+    required: false
+    default: ""
+  pr-public-key:
+    description: Optional Nix public signing key for PR overlays (fetched from /api/v1/public-keys if omitted)
+    required: false
+    default: ""
+  push:
+    description: Push newly built Nix store paths after the job completes
+    required: false
+    default: "true"
+  owner:
+    description: GitHub owner name (only needed when disambiguating a shared manual token)
+    required: false
+    default: ""
+  token:
+    description: Static Bearer token for manual authentication (omit to use GitHub Actions OIDC)
+    required: false
+    default: ""
+  version:
+    description: Firn release tag to download (e.g. v0.1.0 or latest)
+    required: false
+    default: latest
+  jobs:
+    description: Number of concurrent NAR uploads
+    required: false
+    default: ""
+  include-upstream:
+    description: Upload store paths even if already signed by cache.nixos.org
+    required: false
+    default: "false"
+  github-token:
+    description: GitHub token with packages:write used for GHCR uploads in OIDC mode
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: node24
+  main: action/main.mjs
+  post: action/post.mjs
+  post-if: success()
