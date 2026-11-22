@@ -133,9 +133,16 @@ steps:
   - uses: so1ve/firn@v1
     with:
       server: https://cache.example.com
-  - run: nix flake check
+  - run: nix build .#default --print-out-paths >> "$FIRN_PATHS_FILE"
 ```
 
+- **Explicit runtime closure (recommended)**: append build outputs to the
+  automatically exported `$FIRN_PATHS_FILE` (or pass `paths` / `paths-file`) so
+  Firn uploads only the runtime closure of final outputs, skipping build-time
+  crates, patches, and vendored sources.
+- **Zero-config fallback**: if no explicit paths are recorded, Firn diffs
+  `/nix/store` and automatically drops unreferenced fixed-output derivations
+  (FODs) and store-copied source files.
 - Refs listed in `main_refs` (default `refs/heads/main`) push to the main cache.
   Pushes from other branches skip cache upload gracefully.
 - Internal `pull_request` jobs pull from and push to

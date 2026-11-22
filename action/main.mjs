@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  exportEnv,
   getInput,
   listStoreEntries,
   readEventPayload,
@@ -132,16 +133,28 @@ async function main() {
     return;
   }
 
-  const snapshotFile = path.join(
-    tempDir(),
-    `firn-store-before-${process.pid}.txt`,
-  );
-  const before = listStoreEntries();
-  fs.writeFileSync(snapshotFile, `${before.join("\n")}\n`);
-  console.log(`Snapshotted ${before.length} existing /nix/store entries`);
+  const pathsFile =
+    getInput("paths-file") ||
+    path.join(tempDir(), `firn-paths-${process.pid}.txt`);
+  fs.mkdirSync(path.dirname(pathsFile), { recursive: true });
+  if (!fs.existsSync(pathsFile)) {
+    fs.writeFileSync(pathsFile, "");
+  }
+  exportEnv("FIRN_PATHS_FILE", pathsFile);
+  saveState("paths_file", pathsFile);
+
+  if (!getInput("paths")) {
+    const snapshotFile = path.join(
+      tempDir(),
+      `firn-store-before-${process.pid}.txt`,
+    );
+    const before = listStoreEntries();
+    fs.writeFileSync(snapshotFile, `${before.join("\n")}\n`);
+    console.log(`Snapshotted ${before.length} existing /nix/store entries`);
+    saveState("snapshot_file", snapshotFile);
+  }
 
   saveState("should_push", "true");
-  saveState("snapshot_file", snapshotFile);
 }
 
 main().catch((error) => {

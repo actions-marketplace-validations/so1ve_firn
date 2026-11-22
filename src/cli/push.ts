@@ -41,6 +41,7 @@ export interface PushOptions {
   token?: string;
   stdin: boolean;
   includeUpstream: boolean;
+  excludeUnreferencedFods?: boolean;
   skipSignedBy: string[];
   jobs: number;
   zstdLevel: number;
@@ -52,6 +53,7 @@ export interface NixPathInfo {
   storeHash: string;
   narSize: number;
   deriver: string | null;
+  ca: string | null;
   references: string[];
   signatures: string[];
 }
@@ -60,6 +62,7 @@ interface RawPathInfo {
   path?: string;
   narSize: number;
   deriver?: string | null;
+  ca?: string | null;
   references?: string[];
   signatures?: string[];
 }
@@ -90,6 +93,7 @@ export function parseNixPathInfoJson(raw: string): NixPathInfo[] {
         storeHash: storeHashFromPath(item.path),
         narSize: item.narSize,
         deriver: item.deriver ?? null,
+        ca: item.ca ?? null,
         references: normalizeReferences(item.references ?? []),
         signatures: item.signatures ?? [],
       });
@@ -104,6 +108,7 @@ export function parseNixPathInfoJson(raw: string): NixPathInfo[] {
         storeHash: storeHashFromPath(storePath),
         narSize: entry.narSize,
         deriver: entry.deriver ?? null,
+        ca: entry.ca ?? null,
         references: normalizeReferences(entry.references ?? []),
         signatures: entry.signatures ?? [],
       });
@@ -149,24 +154,14 @@ function createCachedToken(
 ): () => Promise<string> {
   let cached = initial ?? "";
   let issuedAt = initial ? Date.now() : 0;
-  let inflight: Promise<string> | null = null;
 
   return async () => {
-    if (cached && Date.now() - issuedAt < TOKEN_REFRESH_MS) {
-      return cached;
+    if (!cached || Date.now() - issuedAt >= TOKEN_REFRESH_MS) {
+      cached = await fetchToken();
+      issuedAt = Date.now();
     }
-    inflight ??= fetchToken()
-      .then((token) => {
-        cached = token;
-        issuedAt = Date.now();
 
-        return token;
-      })
-      .finally(() => {
-        inflight = null;
-      });
-
-    return inflight;
+    return cached;
   };
 }
 
@@ -394,6 +389,40 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+function filterReachableFromBuiltOutputs(
+  closure: readonly NixPathInfo[],
+  rootPaths: ReadonlySet<string>,
+): NixPathInfo[] {
+  const byBasename = new Map(
+    closure.map((item) => [item.path.slice("/nix/store/".length), item]),
+  );
+  const keep = new Set<string>();
+  const queue: NixPathInfo[] = [];
+
+  for (const item of closure) {
+    if (
+      rootPaths.has(item.path) &&
+      item.deriver !== null &&
+      !item.ca?.startsWith("fixed:")
+    ) {
+      keep.add(item.path);
+      queue.push(item);
+    }
+  }
+
+  for (const current of queue) {
+    for (const ref of current.references) {
+      const dep = byBasename.get(ref);
+      if (dep && !keep.has(dep.path)) {
+        keep.add(dep.path);
+        queue.push(dep);
+      }
+    }
+  }
+
+  return closure.filter((item) => keep.has(item.path));
+}
+
 export async function runPush(options: PushOptions): Promise<void> {
   const startedAt = Date.now();
   const rawPaths = await collectInputPaths(options);
@@ -403,7 +432,12 @@ export async function runPush(options: PushOptions): Promise<void> {
     return;
   }
 
-  const closure = await queryNixClosure(rawPaths);
+  const rawClosure = await queryNixClosure(rawPaths);
+  const closure = options.excludeUnreferencedFods
+    ? filterReachableFromBuiltOutputs(rawClosure, new Set(rawPaths))
+    : rawClosure;
+  const skippedFods = rawClosure.length - closure.length;
+
   const candidates = closure.filter(
     (item) =>
       options.includeUpstream ||
@@ -414,7 +448,7 @@ export async function runPush(options: PushOptions): Promise<void> {
   const skippedUpstream = closure.length - candidates.length;
   if (candidates.length === 0) {
     console.error(
-      `${err.green("✓")} Nothing to upload: all ${closure.length} closure paths are signed by skipped upstream keys ${err.dim(`(${options.skipSignedBy.join(", ")})`)}`,
+      `${err.green("✓")} Nothing to upload: 0 candidate paths ${err.dim(`(${[...(skippedFods > 0 ? [`fod-skipped=${skippedFods}`] : []), ...(skippedUpstream > 0 ? [`upstream-skipped=${skippedUpstream}`] : []), `closure=${rawClosure.length}`].join(", ")})`)}`,
     );
 
     return;
@@ -434,6 +468,7 @@ export async function runPush(options: PushOptions): Promise<void> {
 
   const alreadyCached = candidates.length - plan.missing.length;
   const planMeta = [
+    ...(skippedFods > 0 ? [`fod-skipped=${skippedFods}`] : []),
     ...(skippedUpstream > 0 ? [`upstream-skipped=${skippedUpstream}`] : []),
     `closure=${closure.length}`,
     `scope=${plan.scope}`,
@@ -453,37 +488,26 @@ export async function runPush(options: PushOptions): Promise<void> {
   );
 
   const oci = new OciClient(plan.registry);
-  let getPushToken: () => Promise<string>;
-  if (plan.ghcr_token) {
-    getPushToken = createCachedToken(async () => {
-      const refreshed = await postJson<PlanResponse>(
-        `${serverUrl}/api/v1/uploads/plan`,
-        await auth.getBearer(),
-        {
-          ...(options.owner ? { owner: options.owner } : {}),
-          store_paths: [],
-        } satisfies PlanRequest,
-      );
-      if (!refreshed.ghcr_token) {
-        throw new Error(
-          "server did not return a scoped GHCR upload token for manual push",
-        );
-      }
+  const getPushToken =
+    auth.kind === "oidc"
+      ? createCachedToken(() =>
+          oci.exchangeToken(plan.ghcr_repository, "pull,push", [
+            "x-access-token",
+            auth.githubToken,
+          ]),
+        )
+      : createCachedToken(async () => {
+          const refreshed = await postJson<PlanResponse>(
+            `${serverUrl}/api/v1/uploads/plan`,
+            await auth.getBearer(),
+            {
+              ...(options.owner ? { owner: options.owner } : {}),
+              store_paths: [],
+            } satisfies PlanRequest,
+          );
 
-      return refreshed.ghcr_token;
-    }, plan.ghcr_token);
-  } else if (auth.kind === "oidc") {
-    getPushToken = createCachedToken(() =>
-      oci.exchangeToken(plan.ghcr_repository, "pull,push", [
-        "x-access-token",
-        auth.githubToken,
-      ]),
-    );
-  } else {
-    throw new Error(
-      "server did not return a scoped GHCR upload token for manual push",
-    );
-  }
+          return refreshed.ghcr_token!;
+        }, plan.ghcr_token);
 
   const byHash = new Map(candidates.map((item) => [item.storeHash, item]));
   const missingInfos = plan.missing
@@ -494,8 +518,6 @@ export async function runPush(options: PushOptions): Promise<void> {
   let uploadedBytes = 0;
   let uploadedNarBytes = 0;
   let totalCommitted = 0;
-  let lastScope = plan.scope;
-  let lastOwner = plan.owner;
   const totalBatches = Math.ceil(missingInfos.length / COMMIT_BATCH_SIZE);
 
   for (let i = 0; i < missingInfos.length; i += COMMIT_BATCH_SIZE) {
@@ -533,8 +555,6 @@ export async function runPush(options: PushOptions): Promise<void> {
       } satisfies CommitRequest,
     );
     totalCommitted += committed.committed;
-    lastScope = committed.scope;
-    lastOwner = committed.owner;
     if (totalBatches > 1) {
       console.error(
         `  ${err.dim(`↳ Committed batch ${batchIndex}/${totalBatches} (${committed.committed} paths)`)}`,
@@ -543,6 +563,6 @@ export async function runPush(options: PushOptions): Promise<void> {
   }
 
   console.log(
-    `${out.boldGreen("✓")} Committed ${out.bold(String(totalCommitted))} store paths ${out.dim(`(${formatBytes(uploadedBytes)} / ${formatBytes(uploadedNarBytes)} NAR in ${formatDurationMs(Date.now() - startedAt)})`)} to ${out.cyan(serverUrl)} ${out.dim(`(scope=${lastScope}, owner=${lastOwner}, repo=${plan.ghcr_repository})`)}`,
+    `${out.boldGreen("✓")} Committed ${out.bold(String(totalCommitted))} store paths ${out.dim(`(${formatBytes(uploadedBytes)} / ${formatBytes(uploadedNarBytes)} NAR in ${formatDurationMs(Date.now() - startedAt)})`)} to ${out.cyan(serverUrl)} ${out.dim(`(scope=${plan.scope}, owner=${plan.owner}, repo=${plan.ghcr_repository})`)}`,
   );
 }

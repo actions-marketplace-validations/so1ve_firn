@@ -9,24 +9,22 @@ export const getInput = (name) =>
 
 export const getState = (name) => (process.env[`STATE_${name}`] ?? "").trim();
 
-export function saveState(name, value) {
-  const stateFile = process.env.GITHUB_STATE;
-  if (!stateFile) {
+function appendEnvFile(filePath, name, value) {
+  if (!filePath) {
     return;
   }
   const delimiter = `FIRN_EOF_${process.pid}_${Math.random().toString(16).slice(2)}`;
   fs.appendFileSync(
-    stateFile,
+    filePath,
     `${name}<<${delimiter}\n${value}\n${delimiter}\n`,
   );
 }
 
-export function addPath(dir) {
-  const pathFile = process.env.GITHUB_PATH;
-  if (pathFile) {
-    fs.appendFileSync(pathFile, `${dir}\n`);
-  }
-}
+export const saveState = (name, value) =>
+  appendEnvFile(process.env.GITHUB_STATE, name, value);
+
+export const exportEnv = (name, value) =>
+  appendEnvFile(process.env.GITHUB_ENV, name, value);
 
 export const tempDir = () => process.env.RUNNER_TEMP || os.tmpdir();
 

@@ -22,6 +22,14 @@ inputs:
     description: Push newly built Nix store paths after the job completes
     required: false
     default: "true"
+  paths:
+    description: Optional newline- or whitespace-separated Nix store paths (or result symlinks) to push instead of scanning /nix/store
+    required: false
+    default: ""
+  paths-file:
+    description: Optional file of newline-separated Nix store paths to push (Firn also exports FIRN_PATHS_FILE automatically)
+    required: false
+    default: ""
   owner:
     description: GitHub owner name (only needed when disambiguating a shared manual token)
     required: false
