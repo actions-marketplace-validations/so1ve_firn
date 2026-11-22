@@ -5,6 +5,7 @@ edition = "2024"
 description = "Stateful Nix binary cache backed by GHCR"
 repository = "https://github.com/so1ve/firn"
 license = "MIT"
+publish = false
 
 [dependencies]
 anyhow = "1"
