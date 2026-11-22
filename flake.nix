@@ -42,8 +42,13 @@
           ];
 
           buildInputs = with pkgs; [
+            aws-lc
             sqlite
             zstd
+          ];
+
+          nativeCheckInputs = with pkgs; [
+            cacert
           ];
 
           postInstall = ''

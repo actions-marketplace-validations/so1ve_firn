@@ -10,28 +10,28 @@ publish = false
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3", features = ["rand_core"] }
 hex = "0.4"
-hmac = "0.12"
-jsonwebtoken = "9"
-rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
-rusqlite = { version = "0.34", features = ["bundled"] }
+hmac = "0.13"
+jsonwebtoken = { version = "12", features = ["rust_crypto"] }
+rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-toml = "0.8"
+toml = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"] }
-zstd = "0.13"
+zstd = "0.14"
 
 [dev-dependencies]
-rsa = { version = "0.9", features = ["pem"] }
+rsa = "0.10"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 

@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@v32
         with:
           extra_nix_config: accept-flake-config = true
       - run: nix fmt -- --ci
@@ -46,7 +46,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@v32
         with:
           extra_nix_config: accept-flake-config = true
       - run: nix build ".#packages.${{ matrix.system }}.default" --print-build-logs

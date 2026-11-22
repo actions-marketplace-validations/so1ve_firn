@@ -11,12 +11,11 @@ use axum::routing::{delete, get, head, post, put};
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use rand::rngs::OsRng;
 use rsa::pkcs8::EncodePrivateKey;
 use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::{PrivateKey, PublicKey};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -286,8 +285,8 @@ struct TestHarness {
 
 impl TestHarness {
     async fn new() -> Self {
-        let rsa_key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
-        let rsa_pub = RsaPublicKey::from(&rsa_key);
+        let rsa_key = PrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let rsa_pub = PublicKey::from(&rsa_key);
         let rsa_pem = rsa_key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
         let oidc_key = EncodingKey::from_rsa_pem(rsa_pem.as_bytes()).unwrap();
         let jwks = serde_json::json!({
@@ -296,8 +295,8 @@ impl TestHarness {
                 "kid": "test-kid-1",
                 "alg": "RS256",
                 "use": "sig",
-                "n": URL_SAFE_NO_PAD.encode(rsa_pub.n().to_bytes_be()),
-                "e": URL_SAFE_NO_PAD.encode(rsa_pub.e().to_bytes_be()),
+                "n": URL_SAFE_NO_PAD.encode(rsa_pub.n().as_ref().to_be_bytes_trimmed_vartime()),
+                "e": URL_SAFE_NO_PAD.encode(rsa_pub.e().to_be_bytes_trimmed_vartime()),
             }]
         });
 

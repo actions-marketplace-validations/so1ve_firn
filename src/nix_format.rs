@@ -7,7 +7,6 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(test)]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
 
 const NIX_BASE32_ALPHABET: &[u8; 32] = b"0123456789abcdfghijklmnpqrsvwxyz";
 const STORE_PREFIX: &str = "/nix/store/";
@@ -47,7 +46,7 @@ impl SigningKeyPair {
 
         Ok(Self {
             name,
-            signing_key: SigningKey::generate(&mut OsRng),
+            signing_key: SigningKey::generate(&mut rand::rng()),
         })
     }
 

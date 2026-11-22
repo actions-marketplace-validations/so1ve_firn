@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,

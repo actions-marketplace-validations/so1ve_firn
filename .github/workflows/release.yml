@@ -60,8 +60,8 @@ jobs:
           git fetch --depth=1 origin "refs/tags/$RELEASE_TAG"
           git checkout --detach FETCH_HEAD
 
-      - name: Install musl-tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake
 
       - name: Add musl Rust target
         run: rustup target add "${{ matrix.target }}"
