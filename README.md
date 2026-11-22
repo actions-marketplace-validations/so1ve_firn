@@ -1,29 +1,19 @@
 # Firn
 
-Stateful Nix binary cache backed by GHCR.
-
-Firn keeps `.narinfo` metadata, signing keys, and garbage collection state in
-SQLite while storing compressed NAR blobs in GitHub Container Registry. Clients
-upload blobs directly to GHCR and download them via 302 redirects to GHCR's
-presigned CDN URLs, so NAR payloads do not pass through the Firn server.
+Stateful Nix binary cache backed by GHCR. Metadata, signing, and GC live in
+SQLite; compressed NAR blobs go directly between clients and GHCR via 302 CDN
+redirects.
 
 ## Setup
 
-### Signing keys
-
-Generate two Ed25519 key pairs: one for the main cache (default
-`refs/heads/main`, configurable via `protected_refs`) and one for pull request
-overlays. GitHub branch protection rules are not required—Firn matches the OIDC
-`ref` claim against `protected_refs`.
+Generate separate main and PR signing keys:
 
 ```sh
 firn keygen cache.example.com-1 -s main.key -p main.pub
 firn keygen cache.example.com-pr-1 -s pr.key -p pr.pub
 ```
 
-### Server configuration
-
-Minimal configuration:
+Minimal config ([full reference](firn.example.toml)):
 
 ```toml
 database_path = "/var/lib/firn/state.db"
@@ -36,17 +26,11 @@ name = "so1ve"
 github_owner_id = 58381667
 ```
 
-See [firn.example.toml](firn.example.toml) for the full configuration reference
-with every field, default value, and optional section (`[github_app]`, `[gc]`,
-`protected_refs`, `allowed_repos`, manual push tokens, etc.).
-
-Start the server:
+Run directly, with Docker, or via the NixOS module (`inputs.firn.nixosModules.default`):
 
 ```sh
 firn serve /etc/firn/config.toml
 ```
-
-Or run the container image from GHCR:
 
 ```sh
 docker run --rm -p 8080:8080 \
@@ -56,37 +40,22 @@ docker run --rm -p 8080:8080 \
   ghcr.io/so1ve/firn:main
 ```
 
-Or deploy on NixOS with the flake module:
-
 ```nix
-{ inputs, ... }:
-{
-  imports = [ inputs.firn.nixosModules.default ];
-
-  services.firn = {
-    enable = true;
-    settings = {
-      public_base_url = "https://cache.example.com";
-      main_signing_key_file = "/run/secrets/firn-main.key";
-      pr_signing_key_file = "/run/secrets/firn-pr.key";
-      owners = [
-        {
-          name = "so1ve";
-          github_owner_id = 58381667;
-        }
-      ];
-    };
+services.firn = {
+  enable = true;
+  settings = {
+    public_base_url = "https://cache.example.com";
+    main_signing_key_file = "/run/secrets/firn-main.key";
+    pr_signing_key_file = "/run/secrets/firn-pr.key";
+    owners = [{ name = "so1ve"; github_owner_id = 58381667; }];
   };
-}
+};
 ```
 
-## Push
+## GitHub Actions
 
-### GitHub Actions
-
-GitHub Actions authenticate through OIDC (`id-token: write`), matched against
-the owner's numeric `github_owner_id`. No signing key or static secret is needed
-in the repository.
+Uses OIDC (`id-token: write`) with no repository secrets. Public keys are
+fetched from `/api/v1/public-keys` automatically.
 
 ```yaml
 permissions:
@@ -95,82 +64,42 @@ permissions:
   packages: write
 
 steps:
-  - run: nix build .#default --print-out-paths | firn push --server https://cache.example.com --stdin
+  - uses: actions/checkout@v7
+  - uses: cachix/install-nix-action@v31
+  - uses: so1ve/firn@main
+    with:
+      server: https://cache.example.com
+  - run: nix flake check
 ```
 
-- Refs listed in `protected_refs` (`refs/heads/main` by default; GitHub branch
-  protection rules are not required) write to the main cache and are signed with
-  `main_signing_key_file`.
-- Internal `pull_request` workflows write to an isolated PR overlay signed with
-  `pr_signing_key_file`. `pull_request_target` and pushes to unlisted refs are
-  rejected.
-- Paths already signed by `cache.nixos.org-1:` are skipped unless
-  `--include-upstream` is passed.
+- `protected_refs` (default `refs/heads/main`, no GitHub branch protection required) push to the main cache.
+- Internal `pull_request` jobs pull from and push to `/pr/<owner>/<repo>/<number>`. Fork PRs only pull from the main cache.
 
-### Local machine
+## Pull & Manual Push
 
-Configure a static Bearer token in `manual_tokens_file` and a GitHub App
-installation for the owner. Firn exchanges a short-lived scoped GHCR upload
-token on demand.
-
-```sh
-firn push \
-  --server https://cache.example.com \
-  --token "$FIRN_TOKEN" \
-  ./result
-```
-
-## Pull
-
-Main cache (developer machines):
+Client `nix.conf`:
 
 ```text
 extra-substituters = https://cache.example.com
 extra-trusted-public-keys = cache.example.com-1:<MAIN_PUBLIC_KEY>
 ```
 
-PR overlay (CI only; falls back to the main cache on misses):
+Local push (requires `manual_tokens_file` and `[github_app]`):
 
-```text
-extra-substituters = https://cache.example.com/pr/<owner>/<repo>/<number>
-extra-trusted-public-keys = cache.example.com-1:<MAIN_PUBLIC_KEY> cache.example.com-pr-1:<PR_PUBLIC_KEY>
+```sh
+firn push --server https://cache.example.com --token "$FIRN_TOKEN" ./result
 ```
 
-## Operations
+## CLI
 
-Set `FIRN_CONFIG=/etc/firn/config.toml` or pass the config file as the first argument:
+Pass `CONFIG` as the first argument or set `FIRN_CONFIG` (logs via `RUST_LOG`):
 
 ```sh
 firn status /etc/firn/config.toml
-firn ls /etc/firn/config.toml --owner so1ve --limit 50
+firn ls /etc/firn/config.toml --limit 50
 firn pr ls /etc/firn/config.toml
 firn pr rm /etc/firn/config.toml so1ve latchshot 7
 firn gc /etc/firn/config.toml --dry-run
-```
-
-Logs are written to stderr via `tracing` and controlled with `RUST_LOG` (defaults to `info`; use `RUST_LOG=firn=debug` for per-request and cache-hit logs).
-
-## Garbage collection
-
-Firn runs GC every 6 hours (and on demand via `firn gc /etc/firn/config.toml`):
-
-- PR overlays are removed when a signed `pull_request` (`closed`) webhook
-  arrives at `/api/v1/webhooks/github`, or after `pr_ttl_days` without updates.
-- Main-branch paths not accessed within `main_lru_days` are evicted while
-  preserving transitive dependencies of retained paths.
-- Unreferenced GHCR versions are deleted via the configured GitHub App. If
-  GitHub rejects deleting the last version of a package, Firn deletes the empty
-  package instead; if a public version exceeds GitHub's 5,000-download deletion
-  limit, Firn marks it blocked so GC stops retrying it.
-
-## Development
-
-```sh
-devenv shell
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt
-nixfmt flake.nix devenv.nix nix/nixos.nix
 ```
 
 ## License
