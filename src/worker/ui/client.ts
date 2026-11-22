@@ -123,18 +123,17 @@ export const CLIENT_SCRIPT = `
   let activeController = null;
 
   async function refreshPaths() {
-    if (!pathsBody) return;
     if (activeController) activeController.abort();
     activeController = new AbortController();
 
     const params = new URLSearchParams();
-    if (searchInput && searchInput.value.trim()) params.set("q", searchInput.value.trim());
-    if (ownerSelect && ownerSelect.value) params.set("owner", ownerSelect.value);
-    if (scopeSelect && scopeSelect.value) params.set("scope", scopeSelect.value);
-    if (limitSelect && limitSelect.value) params.set("limit", limitSelect.value);
+    if (searchInput.value.trim()) params.set("q", searchInput.value.trim());
+    if (ownerSelect.value) params.set("owner", ownerSelect.value);
+    if (scopeSelect.value) params.set("scope", scopeSelect.value);
+    if (limitSelect.value) params.set("limit", limitSelect.value);
     params.set("sort", currentSort);
 
-    if (pathsStatus) pathsStatus.textContent = "loading…";
+    pathsStatus.textContent = "loading…";
     showNotice("paths-error", "", "");
 
     try {
@@ -162,34 +161,25 @@ export const CLIENT_SCRIPT = `
           const tdPath = document.createElement("td");
           const wrap = document.createElement("div");
           wrap.className = "path-cell";
-          if (parts.hash) {
-            const link = document.createElement("a");
-            link.className = "path-text mono";
-            link.href = prScope
-              ? "/pr/" + encodeURIComponent(prScope.owner) + "/" + encodeURIComponent(prScope.repo) + "/" + prScope.number + "/" + parts.hash + ".narinfo"
-              : "/" + parts.hash + ".narinfo";
-            link.title = item.store_path + " (open .narinfo)";
-            const h = document.createElement("span");
-            h.className = "hash-prefix";
-            h.textContent = parts.hash.slice(0, 8) + "…-";
-            const n = document.createElement("span");
-            n.className = "pkg-name";
-            n.textContent = parts.name;
-            link.append(h, n);
-            wrap.append(link);
-          } else {
-            const span = document.createElement("span");
-            span.className = "path-text mono";
-            span.title = item.store_path;
-            span.textContent = item.store_path;
-            wrap.append(span);
-          }
+          const link = document.createElement("a");
+          link.className = "path-text mono";
+          link.href = prScope
+            ? "/pr/" + encodeURIComponent(prScope.owner) + "/" + encodeURIComponent(prScope.repo) + "/" + prScope.number + "/" + parts.hash + ".narinfo"
+            : "/" + parts.hash + ".narinfo";
+          link.title = item.store_path + " (open .narinfo)";
+          const h = document.createElement("span");
+          h.className = "hash-prefix";
+          h.textContent = parts.hash.slice(0, 8) + "…-";
+          const n = document.createElement("span");
+          n.className = "pkg-name";
+          n.textContent = parts.name;
+          link.append(h, n);
           const copyBtn = document.createElement("button");
           copyBtn.type = "button";
           copyBtn.className = "link-btn row-action";
           copyBtn.textContent = "copy";
           copyBtn.setAttribute("data-copy", item.store_path);
-          wrap.append(copyBtn);
+          wrap.append(link, copyBtn);
           tdPath.appendChild(wrap);
 
           const tdScope = document.createElement("td");
@@ -234,22 +224,20 @@ export const CLIENT_SCRIPT = `
           pathsBody.appendChild(tr);
         }
       }
-      if (pathsStatus) pathsStatus.textContent = items.length + " shown";
+      pathsStatus.textContent = items.length + " shown";
     } catch (error) {
       if (error && error.name === "AbortError") return;
-      if (pathsStatus) pathsStatus.textContent = "";
+      pathsStatus.textContent = "";
       showNotice("paths-error", error instanceof Error ? error.message : String(error), "error");
     }
   }
 
-  if (searchInput) {
-    searchInput.addEventListener("input", () => {
-      clearTimeout(filterTimer);
-      filterTimer = setTimeout(refreshPaths, 180);
-    });
-  }
+  searchInput.addEventListener("input", () => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(refreshPaths, 180);
+  });
   [ownerSelect, scopeSelect, limitSelect].forEach((el) => {
-    if (el) el.addEventListener("change", refreshPaths);
+    el.addEventListener("change", refreshPaths);
   });
   sortButtons.forEach((btn) => {
     btn.addEventListener("click", () => {

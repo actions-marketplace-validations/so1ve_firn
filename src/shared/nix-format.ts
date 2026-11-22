@@ -40,18 +40,6 @@ function base64ToBytes(encoded: string): Uint8Array {
   return out;
 }
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  let diff = 0;
-  for (const [i, element] of a.entries()) {
-    diff |= element ^ b[i];
-  }
-
-  return diff === 0;
-}
-
 function isNixBase32(value: string): boolean {
   for (const element of value) {
     if (!NIX_BASE32_ALPHABET.includes(element)) {
@@ -342,5 +330,3 @@ export async function verifySignature(
     new TextEncoder().encode(fp),
   );
 }
-
-export { bytesEqual };

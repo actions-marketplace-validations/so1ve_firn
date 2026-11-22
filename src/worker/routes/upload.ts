@@ -255,13 +255,11 @@ async function validateAndSign(
     validateSha256NixBase32(entry.file_hash);
     references = normalizeReferences(entry.references ?? []);
 
-    if (entry.deriver && entry.deriver.length > 0) {
-      deriver = entry.deriver.startsWith("/nix/store/")
+    deriver = entry.deriver
+      ? entry.deriver.startsWith("/nix/store/")
         ? storePathBasename(entry.deriver)
-        : entry.deriver;
-    } else {
-      deriver = null;
-    }
+        : entry.deriver
+      : null;
   } catch (error) {
     throw new HttpError(
       400,

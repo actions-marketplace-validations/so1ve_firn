@@ -28,14 +28,6 @@ async function sha256DigestPrefixed(bytes: Uint8Array): Promise<string> {
   return `sha256:${encodeHex(hash)}`;
 }
 
-function resolveRelativeUrl(base: string, location: string): string {
-  if (location.startsWith("http://") || location.startsWith("https://")) {
-    return location;
-  }
-
-  return new URL(location, base).toString();
-}
-
 const isRetryableStatus = (status: number): boolean =>
   status === 408 ||
   status === 429 ||
@@ -228,7 +220,7 @@ export class OciClient {
         );
       }
 
-      return resolveRelativeUrl(this.#registryUrl, location);
+      return new URL(location, this.#registryUrl).toString();
     }
 
     throw new Error(
@@ -285,9 +277,7 @@ export class OciClient {
         );
       }
 
-      const uploadUrl = new URL(
-        resolveRelativeUrl(this.#registryUrl, location),
-      );
+      const uploadUrl = new URL(location, this.#registryUrl);
       uploadUrl.searchParams.set("digest", digest);
 
       const put = await fetch(uploadUrl.toString(), {

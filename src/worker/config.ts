@@ -50,10 +50,7 @@ export interface LoadedConfig {
 
 const OWNER_NAME_RE = /^[\w-]+$/;
 
-function parsePositiveInt(raw: string | undefined, fallback: number): number {
-  if (!raw?.trim()) {
-    return fallback;
-  }
+function parsePositiveInt(raw: string): number {
   const value = Number.parseInt(raw.trim(), 10);
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`expected positive integer, got '${raw}'`);
@@ -61,6 +58,11 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
 
   return value;
 }
+
+const parseOptionalPositiveInt = (
+  raw: string | undefined,
+  fallback: number,
+): number => (raw?.trim() ? parsePositiveInt(raw) : fallback);
 
 function parseManualTokens(raw: string | undefined): Map<string, string[]> {
   const result = new Map<string, string[]>();
@@ -179,7 +181,7 @@ export async function loadConfig(env: WorkerRuntimeEnv): Promise<LoadedConfig> {
   const githubApp: LoadedGitHubApp | null =
     appIdRaw && privateKeyPem
       ? {
-          appId: parsePositiveInt(appIdRaw, 0),
+          appId: parsePositiveInt(appIdRaw),
           privateKeyPem,
         }
       : null;
@@ -202,8 +204,8 @@ export async function loadConfig(env: WorkerRuntimeEnv): Promise<LoadedConfig> {
     githubApp,
     webhookSecret: env.GITHUB_WEBHOOK_SECRET?.trim() || null,
     gc: {
-      prTtlDays: parsePositiveInt(env.GC_PR_TTL_DAYS, 3),
-      mainLruDays: parsePositiveInt(env.GC_MAIN_LRU_DAYS, 15),
+      prTtlDays: parseOptionalPositiveInt(env.GC_PR_TTL_DAYS, 3),
+      mainLruDays: parseOptionalPositiveInt(env.GC_MAIN_LRU_DAYS, 15),
     },
     adminToken: env.ADMIN_TOKEN?.trim() || null,
     ownersByName,

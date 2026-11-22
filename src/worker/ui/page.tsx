@@ -81,10 +81,7 @@ export function DashboardPage({ data }: { data: DashboardData }) {
     return { owner: match[1], repo: match[2], number: match[3] };
   }
 
-  function narinfoHref(scope: string, storeHash: string): string | null {
-    if (!storeHash) {
-      return null;
-    }
+  function narinfoHref(scope: string, storeHash: string): string {
     const pr = parsePrScope(scope);
     if (pr) {
       return `/pr/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/${storeHash}.narinfo`;
@@ -364,25 +361,16 @@ export function DashboardPage({ data }: { data: DashboardData }) {
                           <tr>
                             <td>
                               <div class="path-cell">
-                                {href ? (
-                                  <a
-                                    class="path-text mono"
-                                    href={href}
-                                    title={`${item.store_path} (open .narinfo)`}
-                                  >
-                                    <span class="hash-prefix">
-                                      {parts.hash.slice(0, 8)}…-
-                                    </span>
-                                    <span class="pkg-name">{parts.name}</span>
-                                  </a>
-                                ) : (
-                                  <span
-                                    class="path-text mono"
-                                    title={item.store_path}
-                                  >
-                                    {item.store_path}
+                                <a
+                                  class="path-text mono"
+                                  href={href}
+                                  title={`${item.store_path} (open .narinfo)`}
+                                >
+                                  <span class="hash-prefix">
+                                    {parts.hash.slice(0, 8)}…-
                                   </span>
-                                )}
+                                  <span class="pkg-name">{parts.name}</span>
+                                </a>
                                 <button
                                   type="button"
                                   class="link-btn row-action"
