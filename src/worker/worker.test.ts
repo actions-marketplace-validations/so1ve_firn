@@ -546,6 +546,9 @@ describe("firn worker", () => {
     expect(narinfoRes.status).toBe(200);
 
     const text = await narinfoRes.text();
+
+    expect(text).toContain("\nReferences: \n");
+
     const sig = text
       .split("\n")
       .find((line) => line.startsWith("Sig: "))

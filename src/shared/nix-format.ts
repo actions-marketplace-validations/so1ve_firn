@@ -192,9 +192,7 @@ export function renderNarInfo(info: NarInfo): string {
     `FileSize: ${info.fileSize}`,
     `NarHash: ${info.narHash}`,
     `NarSize: ${info.narSize}`,
-    info.references.length === 0
-      ? "References:"
-      : `References: ${info.references.join(" ")}`,
+    `References: ${info.references.join(" ")}`,
   ];
   if (info.deriver) {
     lines.push(`Deriver: ${info.deriver}`);
