@@ -41,6 +41,11 @@
             pkg-config
           ];
 
+          buildInputs = with pkgs; [
+            sqlite
+            zstd
+          ];
+
           postInstall = ''
             installShellCompletion --cmd firn \
               --bash <("$out/bin/firn" completions bash) \
