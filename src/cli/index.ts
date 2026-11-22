@@ -347,7 +347,7 @@ const cli = Clerc.create({
       console.log(
         renderSection(
           "GC-Blocked Blobs",
-          out.yellow(`(${blockedEntries.length} protected by GHCR)`),
+          out.yellow(`(${blockedEntries.length} blocked by GHCR)`),
         ),
       );
       for (const item of blockedEntries) {
@@ -629,9 +629,9 @@ const cli = Clerc.create({
             : out.dim("0"),
         ],
         [
-          "Blobs protected",
-          report.blobs_protected > 0
-            ? out.boldYellow(String(report.blobs_protected))
+          "Blobs blocked",
+          report.blobs_blocked > 0
+            ? out.boldYellow(String(report.blobs_blocked))
             : out.dim("0"),
         ],
         [

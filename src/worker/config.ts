@@ -9,7 +9,7 @@ export interface RawOwnerConfig {
   github_installation_id?: number | null;
   package_template?: string;
   manual_push_package?: string;
-  protected_refs?: string[];
+  main_refs?: string[];
   allowed_repos?: string[];
 }
 
@@ -20,7 +20,7 @@ export interface LoadedOwner {
   githubInstallationId: number | null;
   packageTemplate: string;
   manualPushPackage: string;
-  protectedRefs: string[];
+  mainRefs: string[];
   allowedRepos: Set<string>;
   manualTokens: string[];
 }
@@ -92,8 +92,8 @@ export const ghcrRepository = (ownerName: string, pkg: string): string =>
 export const isRepoAllowed = (owner: LoadedOwner, repo: string): boolean =>
   owner.allowedRepos.size === 0 || owner.allowedRepos.has(repo);
 
-export const isProtectedRef = (owner: LoadedOwner, refName: string): boolean =>
-  owner.protectedRefs.includes(refName);
+export const isMainRef = (owner: LoadedOwner, refName: string): boolean =>
+  owner.mainRefs.includes(refName);
 
 export interface WorkerRuntimeEnv {
   DB: D1Database;
@@ -166,7 +166,7 @@ export async function loadConfig(env: WorkerRuntimeEnv): Promise<LoadedConfig> {
       manualPushPackage: (
         raw.manual_push_package ?? "manual-cache"
       ).toLowerCase(),
-      protectedRefs: raw.protected_refs ?? ["refs/heads/main"],
+      mainRefs: raw.main_refs ?? ["refs/heads/main"],
       allowedRepos: new Set(raw.allowed_repos),
       manualTokens: manualTokensByOwner.get(raw.name) ?? [],
     };

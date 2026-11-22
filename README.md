@@ -71,7 +71,7 @@ Environment variables (`vars`):
     "github_installation_id": 98765432,
     "package_template": "{repo}-cache",
     "manual_push_package": "manual-cache",
-    "protected_refs": ["refs/heads/main"],
+    "main_refs": ["refs/heads/main"],
     "allowed_repos": []
   }
 ]
@@ -131,8 +131,8 @@ steps:
   - run: nix flake check
 ```
 
-- `protected_refs` (default `refs/heads/main`, no GitHub branch protection
-  required) push to the main cache.
+- Refs listed in `main_refs` (default `refs/heads/main`) push to the main cache.
+  Pushes from other branches skip cache upload gracefully.
 - Internal `pull_request` jobs pull from and push to
   `/pr/<owner>/<repo>/<number>`. Fork PRs only pull from the main cache.
 

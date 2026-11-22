@@ -21,7 +21,7 @@ import type { LoadedConfig, LoadedOwner } from "../config.ts";
 import {
   ghcrPackageForRepo,
   ghcrRepository,
-  isProtectedRef,
+  isMainRef,
   isRepoAllowed,
 } from "../config.ts";
 import type { CommitRecord } from "../db.ts";
@@ -206,11 +206,11 @@ async function authenticate(
     }
     scope = { kind: "pr", owner: owner.name, repo: repoName, number };
   } else {
-    if (!isProtectedRef(owner, claims.ref)) {
+    if (!isMainRef(owner, claims.ref)) {
       throw new HttpError(
         403,
-        `ref '${claims.ref}' is not a protected ref for owner '${owner.name}'`,
-        "unprotected-ref",
+        `ref '${claims.ref}' is not in main_refs for owner '${owner.name}'`,
+        "non-main-ref",
       );
     }
     scope = { kind: "main" };

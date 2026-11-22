@@ -90,7 +90,7 @@ export interface GcReport {
   pr_paths_removed: number;
   main_paths_removed: number;
   blobs_deleted: number;
-  blobs_protected: number;
+  blobs_blocked: number;
   blobs_skipped: number;
   blob_errors: number;
 }

@@ -37,7 +37,7 @@ interface MockStore {
   blobs: Map<string, Uint8Array>;
   manifests: Map<string, Uint8Array>;
   versions: Map<string, { id: number; name: string }[]>;
-  protectedPackages: Set<string>;
+  blockedPackages: Set<string>;
   deletedVersions: number[];
   deletedPackages: string[];
   nextVersionId: number;
@@ -222,7 +222,7 @@ const createMockFetch =
     if (versionDeleteMatch && method === "DELETE") {
       const key = `${versionDeleteMatch[1]}/${versionDeleteMatch[2]}`;
       const vid = Number.parseInt(versionDeleteMatch[3], 10);
-      if (store.protectedPackages.has(key)) {
+      if (store.blockedPackages.has(key)) {
         return Response.json(
           {
             message:
@@ -254,7 +254,7 @@ const createMockFetch =
       /^\/users\/([^/]+)\/packages\/container\/([^/]+)$/.exec(url.pathname);
     if (pkgDeleteMatch && method === "DELETE") {
       const key = `${pkgDeleteMatch[1]}/${pkgDeleteMatch[2]}`;
-      if (store.protectedPackages.has(key)) {
+      if (store.blockedPackages.has(key)) {
         return Response.json(
           {
             message:
@@ -383,7 +383,7 @@ describe("firn worker", () => {
       blobs: new Map(),
       manifests: new Map(),
       versions: new Map(),
-      protectedPackages: new Set(),
+      blockedPackages: new Set(),
       deletedVersions: [],
       deletedPackages: [],
       nextVersionId: 0,
@@ -447,7 +447,7 @@ describe("firn worker", () => {
     ).resolves.toBeTruthy();
   });
 
-  it("rejects pull_request_target and unprotected branch pushes", async () => {
+  it("rejects pull_request_target and non-main branch pushes", async () => {
     const prTarget = await signJwt(rsa.privateKey, {
       iss: "https://oidc.mock",
       aud: "https://cache.so1ve.dev",
@@ -469,7 +469,7 @@ describe("firn worker", () => {
 
     for (const [jwt, expectedCode] of [
       [prTarget, null],
-      [feature, "unprotected-ref"],
+      [feature, "non-main-ref"],
     ] as const) {
       const res = await callWorker(
         new Request("https://cache.so1ve.dev/api/v1/uploads/plan", {
@@ -742,7 +742,7 @@ describe("firn worker", () => {
       "/nix/store/dddddddddddddddddddddddddddddddd-popular",
       "popular-nar",
     );
-    store.protectedPackages.add("so1ve/popular-cache");
+    store.blockedPackages.add("so1ve/popular-cache");
 
     const delPrRes = await callWorker(
       new Request("https://cache.so1ve.dev/api/v1/admin/prs/so1ve/popular/10", {
@@ -762,7 +762,7 @@ describe("firn worker", () => {
       )
     ).json<GcReport>();
 
-    expect(firstGc.blobs_protected).toBe(1);
+    expect(firstGc.blobs_blocked).toBe(1);
     expect(firstGc.blob_errors).toBe(0);
 
     const statusRes = await callWorker(

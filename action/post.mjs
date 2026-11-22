@@ -68,7 +68,7 @@ try {
   if (
     error instanceof PushHttpError &&
     error.status === 403 &&
-    error.code === "unprotected-ref"
+    error.code === "non-main-ref"
   ) {
     console.log(`::notice::Skipping Firn cache push: ${error.body}`);
     process.exit(0);

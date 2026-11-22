@@ -14,7 +14,7 @@ export interface OidcClaims {
 export type DeleteOutcome =
   | { kind: "deleted" }
   | { kind: "not_found" }
-  | { kind: "protected"; reason: string };
+  | { kind: "blocked"; reason: string };
 
 interface JwkKey extends JsonWebKey {
   kid?: string;
@@ -411,7 +411,7 @@ export class GitHubAppClient {
 
     const body = await response.text().catch(() => "");
     if (isDownloadThresholdRejection(response.status, body)) {
-      return { kind: "protected", reason: body };
+      return { kind: "blocked", reason: body };
     }
 
     throw new Error(
@@ -464,7 +464,7 @@ export class GitHubAppClient {
       return this.#deletePackage(packageUrl, token);
     }
     if (isDownloadThresholdRejection(response.status, body)) {
-      return { kind: "protected", reason: body };
+      return { kind: "blocked", reason: body };
     }
 
     throw new Error(

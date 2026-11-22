@@ -25,7 +25,7 @@ export async function runGc(
     pr_paths_removed: await evictExpiredPrScopes(db, prCutoff, dryRun),
     main_paths_removed: await evictStaleMainPaths(db, mainCutoff, dryRun),
     blobs_deleted: 0,
-    blobs_protected: 0,
+    blobs_blocked: 0,
     blobs_skipped: 0,
     blob_errors: 0,
   };
@@ -60,7 +60,7 @@ export async function runGc(
           }
         } else {
           await markBlobGcBlocked(db, blob.id, outcome.reason);
-          report.blobs_protected += 1;
+          report.blobs_blocked += 1;
           console.warn(
             JSON.stringify({
               message:

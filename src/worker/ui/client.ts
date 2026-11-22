@@ -335,7 +335,7 @@ export const CLIENT_SCRIPT = `
           "pr_removed=" + r.pr_paths_removed +
           ", main_removed=" + r.main_paths_removed +
           ", blobs_deleted=" + r.blobs_deleted +
-          ", protected=" + r.blobs_protected +
+          ", blocked=" + r.blobs_blocked +
           ", skipped=" + r.blobs_skipped +
           ", errors=" + r.blob_errors,
         r.blob_errors > 0 ? "error" : "ok",
