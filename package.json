@@ -20,9 +20,9 @@
   "scripts": {
     "cf-typegen": "wrangler types",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run test",
-    "db:migrate": "wrangler d1 migrations apply firn --remote",
-    "db:migrate:local": "wrangler d1 migrations apply firn --local",
-    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply DB --remote",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy",
     "dev": "wrangler dev",
     "lint": "eslint . && prettier . --check",
     "lint:fix": "eslint . --fix && prettier . --write",

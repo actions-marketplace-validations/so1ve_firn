@@ -1,15 +1,14 @@
 # Firn
 
 Stateful Nix binary cache backed by GHCR, running on Cloudflare Workers (Hono +
-D1) with a zero-dependency local Node.js CLI.
+D1) with a built-in web dashboard and Node.js CLI.
 
-Metadata, signing, and GC state live in Cloudflare D1 and compressed NAR blobs go
-directly between clients and GHCR via 302 CDN redirects.
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/so1ve/firn)
+
+Metadata, signing, and GC state live in Cloudflare D1, while compressed NAR
+blobs transfer directly between clients and GHCR via 302 CDN redirects.
 
 ## Install CLI
-
-Requires Nix (runs directly on Node.js 24+ built-ins, no extra build
-dependencies):
 
 ```sh
 # Run once
@@ -24,7 +23,17 @@ and include `inputs.firn.packages.${system}.default` in `environment.systemPacka
 
 ## Deploy (Cloudflare Workers + D1)
 
-### 1. Generate signing keys
+### One-click deploy
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/so1ve/firn)
+
+Cloudflare automatically provisions the D1 database (`DB`), applies
+`migrations/0001_init.sql`, and deploys the Worker. After deploying, set the
+variables and secrets below in the Cloudflare dashboard (or via Wrangler).
+
+### Manual deploy
+
+#### 1. Generate signing keys
 
 Generate two Ed25519 key pairs: one for the main cache and one for pull request
 overlays.
@@ -34,16 +43,16 @@ firn keygen cache.example.com-1 -s main.key -p main.pub
 firn keygen cache.example.com-pr-1 -s pr.key -p pr.pub
 ```
 
-### 2. Configure `wrangler.jsonc` and create D1
+#### 2. Configure `wrangler.jsonc` and create D1
 
-Create the D1 database and apply the schema migration:
+Create the D1 database and update `database_id`, `routes`, and `vars` in
+[wrangler.jsonc](wrangler.jsonc):
 
 ```sh
 pnpm exec wrangler d1 create firn
-pnpm run db:migrate
 ```
 
-Update `database_id`, `routes`, and `vars` in [wrangler.jsonc](wrangler.jsonc):
+Environment variables (`vars`):
 
 - `PUBLIC_BASE_URL`: public HTTPS URL of the cache (also used as the OIDC
   audience).
@@ -72,10 +81,11 @@ Update `database_id`, `routes`, and `vars` in [wrangler.jsonc](wrangler.jsonc):
 > write** and **Pull requests: Read-only**, subscribe to `Pull request` events,
 > and point the webhook URL to `https://cache.example.com/api/v1/webhooks/github`.
 
-### 3. Upload secrets and deploy
+#### 3. Upload secrets and deploy
 
 See [.dev.vars.example](.dev.vars.example) for local development. In production,
-set secrets via Wrangler and deploy:
+set secrets via Wrangler and deploy (`pnpm run deploy` applies D1 migrations and
+deploys the Worker):
 
 ```sh
 pnpm exec wrangler secret put MAIN_SIGNING_KEY < main.key
@@ -87,11 +97,24 @@ pnpm exec wrangler secret put ADMIN_TOKEN
 pnpm run deploy
 ```
 
+## Web Dashboard
+
+Opening the cache root URL (`GET /`) in a browser serves a server-rendered
+dashboard showing:
+
+- Cache summary (main/PR path counts, blob totals, priority, GC policy)
+- Copyable `nix.conf`, GitHub Actions, and PR Overlay configuration snippets
+- Live-filterable store paths table with direct `.narinfo` links
+- Active PR overlays with remaining TTL and GitHub links
+- Per-owner GHCR storage breakdown and `gc-blocked` package notices
+- Optional **Admin** unlock (using `ADMIN_TOKEN`, stored in `sessionStorage`) to
+  run dry-run/full GC or remove PR overlays directly from the browser
+
 ## GitHub Actions
 
 Uses OIDC (`id-token: write`) with no repository secrets. Public keys are
 fetched automatically from `/api/v1/public-keys`, and the action runs directly
-on Node 24 with no binary download.
+on Node 24 with zero dependency installation or binary downloads.
 
 ```yaml
 permissions:
@@ -145,7 +168,8 @@ Use `--owner <name>` only if the same token is shared across multiple owners,
 
 When `ADMIN_TOKEN` is configured on the Worker, the local CLI can inspect and
 manage the remote D1 cache from any machine (pass `--server` / `--token` or set
-`FIRN_SERVER` / `FIRN_ADMIN_TOKEN`):
+`FIRN_SERVER` / `FIRN_ADMIN_TOKEN`; add `--json` to any read/GC command for
+machine-readable output):
 
 ```sh
 export FIRN_SERVER=https://cache.example.com
@@ -154,8 +178,9 @@ export FIRN_ADMIN_TOKEN=<admin-token>
 # Overview: public keys, GC policy, store path counts, per-owner blob usage & gc-blocked list
 firn status
 
-# List recently accessed store paths (optional: --owner <name>, --scope main|pr:<owner>:<repo>:<n>)
+# List recently accessed store paths (optional: -q <text>, --owner <name>, --scope <scope>)
 firn ls --limit 50
+firn ls -q firefox --owner so1ve
 
 # List active PR overlays and remaining TTL
 firn pr ls
