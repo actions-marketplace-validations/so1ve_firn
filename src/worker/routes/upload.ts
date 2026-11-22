@@ -58,12 +58,21 @@ interface AuthenticatedUpload {
 
 class HttpError extends Error {
   public readonly status: 400 | 401 | 403 | 503;
+  public readonly code: string | undefined;
 
-  constructor(status: 400 | 401 | 403 | 503, message: string) {
+  constructor(status: 400 | 401 | 403 | 503, message: string, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
+
+const errorResponse = (c: Context<AppBindings>, error: HttpError): Response =>
+  c.text(
+    error.message,
+    error.status,
+    error.code ? { "X-Firn-Error": error.code } : undefined,
+  );
 
 const scopeToDbString = (scope: UploadScope): string =>
   scope.kind === "main"
@@ -201,6 +210,7 @@ async function authenticate(
       throw new HttpError(
         403,
         `ref '${claims.ref}' is not a protected ref for owner '${owner.name}'`,
+        "unprotected-ref",
       );
     }
     scope = { kind: "main" };
@@ -375,7 +385,7 @@ export async function handleUploadPlan(
     return c.json(response);
   } catch (error) {
     if (error instanceof HttpError) {
-      return c.text(error.message, error.status);
+      return errorResponse(c, error);
     }
 
     throw error;
@@ -425,7 +435,7 @@ export async function handleUploadCommit(
     return c.json(response);
   } catch (error) {
     if (error instanceof HttpError) {
-      return c.text(error.message, error.status);
+      return errorResponse(c, error);
     }
 
     throw error;

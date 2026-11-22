@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import { runPush } from "../src/cli/push.ts";
+import { PushHttpError, runPush } from "../src/cli/push.ts";
 import { getInput, getState, listStoreEntries } from "./common.mjs";
 
 async function main() {
@@ -65,6 +65,15 @@ async function main() {
 try {
   await main();
 } catch (error) {
+  if (
+    error instanceof PushHttpError &&
+    error.status === 403 &&
+    error.code === "unprotected-ref"
+  ) {
+    console.log(`::notice::Skipping Firn cache push: ${error.body}`);
+    process.exit(0);
+  }
+
   console.error(
     `::error::${error instanceof Error ? error.message : String(error)}`,
   );

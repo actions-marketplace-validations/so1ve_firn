@@ -181,6 +181,19 @@ async function resolveAuth(
   return { kind: "oidc", jwt: data.value, githubToken };
 }
 
+export class PushHttpError extends Error {
+  public readonly status: number;
+  public readonly body: string;
+  public readonly code: string | null;
+
+  constructor(url: string, status: number, body: string, code: string | null) {
+    super(`request to ${url} failed (${status}): ${body}`);
+    this.status = status;
+    this.body = body;
+    this.code = code;
+  }
+}
+
 async function postJson<TResp>(
   url: string,
   bearer: string,
@@ -197,7 +210,12 @@ async function postJson<TResp>(
   if (!response.ok) {
     const text = await response.text().catch(() => "");
 
-    throw new Error(`request to ${url} failed (${response.status}): ${text}`);
+    throw new PushHttpError(
+      url,
+      response.status,
+      text,
+      response.headers.get("x-firn-error"),
+    );
   }
 
   return await response.json();

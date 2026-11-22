@@ -467,7 +467,10 @@ describe("firn worker", () => {
       event_name: "push",
     });
 
-    for (const jwt of [prTarget, feature]) {
+    for (const [jwt, expectedCode] of [
+      [prTarget, null],
+      [feature, "unprotected-ref"],
+    ] as const) {
       const res = await callWorker(
         new Request("https://cache.so1ve.dev/api/v1/uploads/plan", {
           method: "POST",
@@ -480,6 +483,7 @@ describe("firn worker", () => {
       );
 
       expect(res.status).toBe(403);
+      expect(res.headers.get("x-firn-error")).toBe(expectedCode);
     }
   });
 
