@@ -3,8 +3,6 @@
 Stateful Nix binary cache backed by GHCR, running on Cloudflare Workers (Hono +
 D1) with a built-in web dashboard and Node.js CLI.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/so1ve/firn)
-
 Metadata, signing, and GC state live in Cloudflare D1, while compressed NAR
 blobs transfer directly between clients and GHCR via 302 CDN redirects.
 
