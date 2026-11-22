@@ -19,7 +19,13 @@ import type {
   PlanRequest,
   PlanResponse,
 } from "../shared/protocol.ts";
-import { err, formatBytes, formatStorePath, out } from "./format.ts";
+import {
+  err,
+  formatBytes,
+  formatDurationMs,
+  formatStorePath,
+  out,
+} from "./format.ts";
 
 const execFileAsync = promisify(execFile);
 // Keep each commit batch safely below Cloudflare Workers' 50-subrequest limit
@@ -328,6 +334,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 export async function runPush(options: PushOptions): Promise<void> {
+  const startedAt = Date.now();
   const rawPaths = await collectInputPaths(options);
   if (rawPaths.length === 0) {
     console.error(`${err.dim("▸")} No store paths provided; nothing to push.`);
@@ -343,9 +350,10 @@ export async function runPush(options: PushOptions): Promise<void> {
         options.skipSignedBy.some((prefix) => sig.startsWith(prefix)),
       ),
   );
+  const skippedUpstream = closure.length - candidates.length;
   if (candidates.length === 0) {
     console.error(
-      `${err.green("✓")} All ${closure.length} store paths are already signed by skipped upstream keys; nothing to push.`,
+      `${err.green("✓")} Nothing to upload: all ${closure.length} closure paths are signed by skipped upstream keys ${err.dim(`(${options.skipSignedBy.join(", ")})`)}`,
     );
 
     return;
@@ -364,16 +372,24 @@ export async function runPush(options: PushOptions): Promise<void> {
     } satisfies PlanRequest,
   );
 
+  const alreadyCached = candidates.length - plan.missing.length;
+  const planMeta = [
+    ...(skippedUpstream > 0 ? [`upstream-skipped=${skippedUpstream}`] : []),
+    `closure=${closure.length}`,
+    `scope=${plan.scope}`,
+    `repo=${plan.ghcr_repository}`,
+  ];
+
   if (plan.missing.length === 0) {
     console.error(
-      `${err.green("✓")} All ${candidates.length} store paths are already cached ${err.dim(`(scope=${plan.scope})`)}`,
+      `${err.green("✓")} Nothing to upload: ${alreadyCached} already cached ${err.dim(`(${planMeta.join(", ")})`)}`,
     );
 
     return;
   }
 
   console.error(
-    `${err.cyan("▸")} Uploading ${err.bold(String(plan.missing.length))}${err.dim(`/${candidates.length}`)} store paths to ${err.bold(plan.ghcr_repository)} ${err.dim(`(scope=${plan.scope})`)}`,
+    `${err.cyan("▸")} Uploading ${err.bold(String(plan.missing.length))} store paths to ${err.bold(plan.ghcr_repository)} ${err.dim(`(cached=${alreadyCached}, ${planMeta.slice(0, -1).join(", ")}, jobs=${options.jobs})`)}`,
   );
 
   const oci = new OciClient(plan.registry);
@@ -398,11 +414,14 @@ export async function runPush(options: PushOptions): Promise<void> {
 
   let uploadedCount = 0;
   let uploadedBytes = 0;
+  let uploadedNarBytes = 0;
   let totalCommitted = 0;
   let lastScope = plan.scope;
   let lastOwner = plan.owner;
+  const totalBatches = Math.ceil(missingInfos.length / COMMIT_BATCH_SIZE);
 
   for (let i = 0; i < missingInfos.length; i += COMMIT_BATCH_SIZE) {
+    const batchIndex = Math.floor(i / COMMIT_BATCH_SIZE) + 1;
     const chunk = missingInfos.slice(i, i + COMMIT_BATCH_SIZE);
     const entries = await mapWithConcurrency(
       chunk,
@@ -417,8 +436,9 @@ export async function runPush(options: PushOptions): Promise<void> {
         );
         uploadedCount += 1;
         uploadedBytes += entry.file_size;
+        uploadedNarBytes += entry.nar_size;
         console.error(
-          `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${formatStorePath(info.path, err)} ${err.dim(`(${formatBytes(entry.file_size)})`)}`,
+          `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${formatStorePath(info.path, err)} ${err.dim(`(${formatBytes(entry.file_size)} / ${formatBytes(entry.nar_size)} NAR)`)}`,
         );
 
         return entry;
@@ -436,9 +456,14 @@ export async function runPush(options: PushOptions): Promise<void> {
     totalCommitted += committed.committed;
     lastScope = committed.scope;
     lastOwner = committed.owner;
+    if (totalBatches > 1) {
+      console.error(
+        `  ${err.dim(`↳ Committed batch ${batchIndex}/${totalBatches} (${committed.committed} paths)`)}`,
+      );
+    }
   }
 
   console.log(
-    `${out.boldGreen("✓")} Committed ${out.bold(String(totalCommitted))} store paths ${out.dim(`(${formatBytes(uploadedBytes)})`)} to ${out.cyan(serverUrl)} ${out.dim(`(scope=${lastScope}, owner=${lastOwner})`)}`,
+    `${out.boldGreen("✓")} Committed ${out.bold(String(totalCommitted))} store paths ${out.dim(`(${formatBytes(uploadedBytes)} / ${formatBytes(uploadedNarBytes)} NAR in ${formatDurationMs(Date.now() - startedAt)})`)} to ${out.cyan(serverUrl)} ${out.dim(`(scope=${lastScope}, owner=${lastOwner}, repo=${plan.ghcr_repository})`)}`,
   );
 }

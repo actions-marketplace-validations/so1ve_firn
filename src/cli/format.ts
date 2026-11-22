@@ -5,6 +5,7 @@ import { splitStorePath } from "../shared/format.ts";
 export {
   formatAge,
   formatBytes,
+  formatDurationMs,
   formatRemainingTtl,
 } from "../shared/format.ts";
 

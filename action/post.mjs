@@ -47,7 +47,7 @@ async function main() {
   }
 
   console.log(
-    `Pushing ${newPaths.length} newly built Nix store paths to ${server}`,
+    `Inspecting ${newPaths.length} new /nix/store entries for ${server}`,
   );
   await runPush({
     server,
