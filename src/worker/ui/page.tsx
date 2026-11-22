@@ -1,5 +1,6 @@
 import { raw } from "hono/html";
 
+import manifest from "../../../package.json" with { type: "json" };
 import {
   formatAge,
   formatBytes,
@@ -102,7 +103,7 @@ export function DashboardPage({ data }: { data: DashboardData }) {
         <style>{raw(STYLES)}</style>
       </head>
       <body>
-        <main class="wrap">
+        <div class="wrap">
           <header class="head">
             <div class="head-top">
               <div class="brand">
@@ -185,477 +186,513 @@ export function DashboardPage({ data }: { data: DashboardData }) {
             )}
           </header>
 
-          <div id="admin-notice" class="notice" role="status" hidden />
+          <main>
+            <div id="admin-notice" class="notice" role="status" hidden />
 
-          <section aria-labelledby="usage-heading">
-            <div class="sec-head">
-              <div class="tabs-row">
-                <h2 id="usage-heading">Substituter</h2>
-                <div
-                  class="tabs"
-                  role="tablist"
-                  aria-label="Configuration format"
+            <section aria-labelledby="usage-heading">
+              <div class="sec-head">
+                <div class="tabs-row">
+                  <h2 id="usage-heading">Substituter</h2>
+                  <div
+                    class="tabs"
+                    role="tablist"
+                    aria-label="Configuration format"
+                  >
+                    <button
+                      type="button"
+                      class="tab-btn"
+                      role="tab"
+                      aria-selected="true"
+                      data-tab="nix"
+                    >
+                      nix.conf
+                    </button>
+                    <button
+                      type="button"
+                      class="tab-btn"
+                      role="tab"
+                      aria-selected="false"
+                      data-tab="gha"
+                    >
+                      GitHub Actions
+                    </button>
+                    <button
+                      type="button"
+                      class="tab-btn"
+                      role="tab"
+                      aria-selected="false"
+                      data-tab="pr"
+                    >
+                      PR Overlay
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  id="snippet-copy-btn"
+                  class="link-btn accent"
+                  data-copy={nixConfSnippet}
                 >
-                  <button
-                    type="button"
-                    class="tab-btn"
-                    role="tab"
-                    aria-selected="true"
-                    data-tab="nix"
-                  >
-                    nix.conf
-                  </button>
-                  <button
-                    type="button"
-                    class="tab-btn"
-                    role="tab"
-                    aria-selected="false"
-                    data-tab="gha"
-                  >
-                    GitHub Actions
-                  </button>
-                  <button
-                    type="button"
-                    class="tab-btn"
-                    role="tab"
-                    aria-selected="false"
-                    data-tab="pr"
-                  >
-                    PR Overlay
-                  </button>
+                  Copy
+                </button>
+              </div>
+
+              <div
+                class="code-block"
+                data-panel="nix"
+                data-snippet={nixConfSnippet}
+              >
+                <pre>{nixConfSnippet}</pre>
+              </div>
+              <div
+                class="code-block"
+                data-panel="gha"
+                data-snippet={actionsSnippet}
+                hidden
+              >
+                <pre>{actionsSnippet}</pre>
+              </div>
+              <div
+                class="code-block"
+                data-panel="pr"
+                data-snippet={prSnippet}
+                hidden
+              >
+                <pre>{prSnippet}</pre>
+              </div>
+            </section>
+
+            <section aria-labelledby="paths-heading">
+              <div class="sec-head">
+                <div class="sec-title">
+                  <h2 id="paths-heading">Store Paths</h2>
+                  <span id="paths-status" class="sec-count">
+                    {data.paths.length} shown
+                  </span>
+                </div>
+                <div class="toolbar">
+                  <label class="sr-only" for="filter-q">
+                    Filter store paths
+                  </label>
+                  <input
+                    id="filter-q"
+                    type="search"
+                    placeholder="Filter paths…"
+                  />
+                  <label class="sr-only" for="filter-owner">
+                    Filter by owner
+                  </label>
+                  <select id="filter-owner">
+                    <option value="">All owners</option>
+                    {data.owners.map((owner) => (
+                      <option value={owner.name}>{owner.name}</option>
+                    ))}
+                  </select>
+                  <label class="sr-only" for="filter-scope">
+                    Filter by scope
+                  </label>
+                  <select id="filter-scope">
+                    <option value="">All scopes</option>
+                    {scopeOptions.map((scope) => (
+                      <option value={scope}>{scope}</option>
+                    ))}
+                  </select>
+                  <label class="sr-only" for="filter-limit">
+                    Result limit
+                  </label>
+                  <select id="filter-limit">
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                  </select>
                 </div>
               </div>
-              <button
-                type="button"
-                id="snippet-copy-btn"
-                class="link-btn accent"
-                data-copy={nixConfSnippet}
-              >
-                Copy
-              </button>
-            </div>
 
-            <div
-              class="code-block"
-              data-panel="nix"
-              data-snippet={nixConfSnippet}
-            >
-              <pre>{nixConfSnippet}</pre>
-            </div>
-            <div
-              class="code-block"
-              data-panel="gha"
-              data-snippet={actionsSnippet}
-              hidden
-            >
-              <pre>{actionsSnippet}</pre>
-            </div>
-            <div
-              class="code-block"
-              data-panel="pr"
-              data-snippet={prSnippet}
-              hidden
-            >
-              <pre>{prSnippet}</pre>
-            </div>
-          </section>
+              <div id="paths-error" class="notice error" role="alert" hidden />
 
-          <section aria-labelledby="paths-heading">
-            <div class="sec-head">
-              <div class="sec-title">
-                <h2 id="paths-heading">Store Paths</h2>
-                <span id="paths-status" class="sec-count">
-                  {data.paths.length} shown
-                </span>
-              </div>
-              <div class="toolbar">
-                <label class="sr-only" for="filter-q">
-                  Filter store paths
-                </label>
-                <input
-                  id="filter-q"
-                  type="search"
-                  placeholder="Filter paths…"
-                />
-                <label class="sr-only" for="filter-owner">
-                  Filter by owner
-                </label>
-                <select id="filter-owner">
-                  <option value="">All owners</option>
-                  {data.owners.map((owner) => (
-                    <option value={owner.name}>{owner.name}</option>
-                  ))}
-                </select>
-                <label class="sr-only" for="filter-scope">
-                  Filter by scope
-                </label>
-                <select id="filter-scope">
-                  <option value="">All scopes</option>
-                  {scopeOptions.map((scope) => (
-                    <option value={scope}>{scope}</option>
-                  ))}
-                </select>
-                <label class="sr-only" for="filter-limit">
-                  Result limit
-                </label>
-                <select id="filter-limit">
-                  <option value="50">50</option>
-                  <option value="100">100</option>
-                  <option value="200">200</option>
-                </select>
-              </div>
-            </div>
-
-            <div id="paths-error" class="notice error" role="alert" hidden />
-
-            <div class="table-scroll">
-              <table class="paths-table">
-                <colgroup>
-                  <col class="col-path" />
-                  <col class="col-scope" />
-                  <col class="col-owner" />
-                  <col class="col-size" />
-                  <col class="col-time" />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th>Path</th>
-                    <th>Scope</th>
-                    <th>Owner</th>
-                    <th class="num" aria-sort="none">
-                      <button type="button" class="sort-btn" data-sort="size">
-                        <span class="sort-arrow" aria-hidden="true">
-                          ↓
-                        </span>
-                        Size
-                      </button>
-                    </th>
-                    <th class="num" aria-sort="descending">
-                      <button
-                        type="button"
-                        class="sort-btn active"
-                        data-sort="accessed"
-                      >
-                        <span class="sort-arrow" aria-hidden="true">
-                          ↓
-                        </span>
-                        Accessed
-                      </button>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody id="paths-body">
-                  {data.paths.length === 0 ? (
-                    <tr>
-                      <td class="empty-cell" colSpan={5}>
-                        No cached store paths yet. Push artifacts with GitHub
-                        Actions or <code>firn push</code>.
-                      </td>
-                    </tr>
-                  ) : (
-                    data.paths.map((item) => {
-                      const parts = splitStorePath(item.store_path);
-                      const prScope = parsePrScope(item.scope);
-                      const href = narinfoHref(item.scope, parts.hash);
-
-                      return (
-                        <tr>
-                          <td>
-                            <div class="path-cell">
-                              {href ? (
-                                <a
-                                  class="path-text mono"
-                                  href={href}
-                                  title={`${item.store_path} (open .narinfo)`}
-                                >
-                                  <span class="hash-prefix">
-                                    {parts.hash.slice(0, 8)}…-
-                                  </span>
-                                  <span class="pkg-name">{parts.name}</span>
-                                </a>
-                              ) : (
-                                <span
-                                  class="path-text mono"
-                                  title={item.store_path}
-                                >
-                                  {item.store_path}
-                                </span>
-                              )}
-                              <button
-                                type="button"
-                                class="link-btn row-action"
-                                data-copy={item.store_path}
-                              >
-                                copy
-                              </button>
-                            </div>
-                          </td>
-                          <td class="mono muted">
-                            <span class="scope-label" title={item.scope}>
-                              <span
-                                class={`dot ${item.scope === "main" ? "main" : "pr"}`}
-                                aria-hidden="true"
-                              />
-                              {prScope ? (
-                                <a
-                                  class="scope-text"
-                                  href={`https://github.com/${encodeURIComponent(prScope.owner)}/${encodeURIComponent(prScope.repo)}/pull/${prScope.number}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                >
-                                  {item.scope}
-                                </a>
-                              ) : (
-                                <span class="scope-text">{item.scope}</span>
-                              )}
-                            </span>
-                          </td>
-                          <td class="mono muted">
-                            <a
-                              href={`https://github.com/${encodeURIComponent(item.owner_id)}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              {item.owner_id}
-                            </a>
-                          </td>
-                          <td class="num mono">
-                            {formatBytes(item.file_size)}
-                          </td>
-                          <td
-                            class="num muted"
-                            title={new Date(
-                              item.last_accessed_at * 1000,
-                            ).toISOString()}
-                          >
-                            {formatAge(data.now, item.last_accessed_at)}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section aria-labelledby="prs-heading">
-            <div class="sec-head">
-              <div class="sec-title">
-                <h2 id="prs-heading">Active PR Overlays</h2>
-                <span class="sec-count">{data.prs.length}</span>
-              </div>
-            </div>
-
-            {data.prs.length === 0 ? (
-              <p class="empty-line">No active PR overlays.</p>
-            ) : (
               <div class="table-scroll">
-                <table class="prs-table">
+                <table class="paths-table">
                   <colgroup>
-                    <col class="col-repo" />
-                    <col class="col-count" />
+                    <col class="col-path" />
+                    <col class="col-scope" />
+                    <col class="col-owner" />
+                    <col class="col-size" />
                     <col class="col-time" />
-                    <col class="col-time" />
-                    <col class="col-actions" />
                   </colgroup>
                   <thead>
                     <tr>
-                      <th>Repository</th>
-                      <th class="num">Paths</th>
-                      <th class="num">Updated</th>
-                      <th class="num">TTL</th>
-                      <th class="num" aria-label="Actions" />
+                      <th>Path</th>
+                      <th>Scope</th>
+                      <th>Owner</th>
+                      <th class="num" aria-sort="none">
+                        <button type="button" class="sort-btn" data-sort="size">
+                          <span class="sort-arrow" aria-hidden="true">
+                            ↓
+                          </span>
+                          Size
+                        </button>
+                      </th>
+                      <th class="num" aria-sort="descending">
+                        <button
+                          type="button"
+                          class="sort-btn active"
+                          data-sort="accessed"
+                        >
+                          <span class="sort-arrow" aria-hidden="true">
+                            ↓
+                          </span>
+                          Accessed
+                        </button>
+                      </th>
                     </tr>
                   </thead>
-                  <tbody>
-                    {data.prs.map((pr) => {
-                      const overlayUrl = `${data.publicBaseUrl}/pr/${pr.owner_id}/${pr.repo}/${pr.pr_number}`;
-                      const ttl = formatRemainingTtl(
-                        data.now,
-                        pr.updated_at,
-                        data.gc.prTtlDays,
-                      );
-                      const ttlClass =
-                        ttl.state === "expired"
-                          ? "danger-text"
-                          : ttl.state === "warn"
-                            ? "warn-text"
-                            : "muted";
+                  <tbody id="paths-body">
+                    {data.paths.length === 0 ? (
+                      <tr>
+                        <td class="empty-cell" colSpan={5}>
+                          No cached store paths yet. Push artifacts with GitHub
+                          Actions or <code>firn push</code>.
+                        </td>
+                      </tr>
+                    ) : (
+                      data.paths.map((item) => {
+                        const parts = splitStorePath(item.store_path);
+                        const prScope = parsePrScope(item.scope);
+                        const href = narinfoHref(item.scope, parts.hash);
 
-                      const repoUrl = `https://github.com/${encodeURIComponent(pr.owner_id)}/${encodeURIComponent(pr.repo)}`;
-                      const prUrl = `${repoUrl}/pull/${pr.pr_number}`;
-
-                      return (
-                        <tr>
-                          <td class="mono">
-                            <a
-                              href={repoUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              <span class="muted">{pr.owner_id}/</span>
-                              <strong>{pr.repo}</strong>
-                            </a>{" "}
-                            <a
-                              class="muted"
-                              href={prUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                            >
-                              #{pr.pr_number}
-                            </a>
-                          </td>
-                          <td class="num mono">{pr.path_count}</td>
-                          <td
-                            class="num muted"
-                            title={new Date(pr.updated_at * 1000).toISOString()}
-                          >
-                            {formatAge(data.now, pr.updated_at)}
-                          </td>
-                          <td class={`num ${ttlClass}`}>{ttl.text}</td>
-                          <td class="num">
-                            <span class="row-actions">
-                              <button
-                                type="button"
-                                class="link-btn"
-                                data-copy={overlayUrl}
-                              >
-                                copy url
-                              </button>
-                              {data.adminEnabled && (
+                        return (
+                          <tr>
+                            <td>
+                              <div class="path-cell">
+                                {href ? (
+                                  <a
+                                    class="path-text mono"
+                                    href={href}
+                                    title={`${item.store_path} (open .narinfo)`}
+                                  >
+                                    <span class="hash-prefix">
+                                      {parts.hash.slice(0, 8)}…-
+                                    </span>
+                                    <span class="pkg-name">{parts.name}</span>
+                                  </a>
+                                ) : (
+                                  <span
+                                    class="path-text mono"
+                                    title={item.store_path}
+                                  >
+                                    {item.store_path}
+                                  </span>
+                                )}
                                 <button
                                   type="button"
-                                  class="link-btn danger admin-only"
-                                  hidden
-                                  data-delete-pr={`${encodeURIComponent(pr.owner_id)}/${encodeURIComponent(pr.repo)}/${pr.pr_number}`}
+                                  class="link-btn row-action"
+                                  data-copy={item.store_path}
                                 >
-                                  remove
+                                  copy
                                 </button>
-                              )}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-
-          <section aria-labelledby="owners-heading">
-            <div class="sec-head">
-              <div class="sec-title">
-                <h2 id="owners-heading">Owners &amp; Storage</h2>
-                <span class="sec-count">{data.owners.length}</span>
-              </div>
-            </div>
-
-            {data.owners.length === 0 ? (
-              <p class="empty-line">No owners configured.</p>
-            ) : (
-              <div class="table-scroll">
-                <table class="owners-table">
-                  <colgroup>
-                    <col class="col-owner-name" />
-                    <col class="col-share" />
-                    <col class="col-size" />
-                    <col class="col-count" />
-                    <col class="col-count" />
-                    <col class="col-count" />
-                  </colgroup>
-                  <thead>
-                    <tr>
-                      <th>Owner</th>
-                      <th class="share-col" aria-label="Storage share" />
-                      <th class="num">Size</th>
-                      <th class="num">Blobs</th>
-                      <th class="num">Unref</th>
-                      <th class="num">PRs</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.owners.map((owner) => {
-                      const share =
-                        owner.total_bytes > 0
-                          ? Math.max(0.02, owner.total_bytes / maxOwnerBytes)
-                          : 0;
-
-                      const pkgBase =
-                        owner.owner_type === "org"
-                          ? `https://github.com/orgs/${encodeURIComponent(owner.name)}/packages/container/package`
-                          : `https://github.com/users/${encodeURIComponent(owner.name)}/packages/container/package`;
-
-                      const hasBlocked = owner.blocked_blobs.length > 0;
-
-                      return (
-                        <>
-                          <tr class={hasBlocked ? "owner-has-blocked" : ""}>
-                            <td class="mono">
-                              <span class="owner-name">
-                                <a
-                                  href={`https://github.com/${encodeURIComponent(owner.name)}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                >
-                                  <strong>{owner.name}</strong>
-                                </a>
-                                <span class="faint">{owner.owner_type}</span>
+                              </div>
+                            </td>
+                            <td class="mono muted">
+                              <span class="scope-label" title={item.scope}>
+                                <span
+                                  class={`dot ${item.scope === "main" ? "main" : "pr"}`}
+                                  aria-hidden="true"
+                                />
+                                {prScope ? (
+                                  <a
+                                    class="scope-text"
+                                    href={`https://github.com/${encodeURIComponent(prScope.owner)}/${encodeURIComponent(prScope.repo)}/pull/${prScope.number}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  >
+                                    {item.scope}
+                                  </a>
+                                ) : (
+                                  <span class="scope-text">{item.scope}</span>
+                                )}
                               </span>
                             </td>
-                            <td class="share-col">
-                              <div
-                                class="share-bar"
-                                style={`--share:${share.toFixed(4)}`}
-                                aria-hidden="true"
-                              />
+                            <td class="mono muted">
+                              <a
+                                href={`https://github.com/${encodeURIComponent(item.owner_id)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                {item.owner_id}
+                              </a>
                             </td>
                             <td class="num mono">
-                              <strong>{formatBytes(owner.total_bytes)}</strong>
-                            </td>
-                            <td class="num mono muted">{owner.total_blobs}</td>
-                            <td
-                              class={`num mono ${owner.unreferenced_blobs > 0 ? "muted" : "faint"}`}
-                            >
-                              {owner.unreferenced_blobs}
+                              {formatBytes(item.file_size)}
                             </td>
                             <td
-                              class={`num mono ${owner.active_prs > 0 ? "muted" : "faint"}`}
+                              class="num muted"
+                              title={new Date(
+                                item.last_accessed_at * 1000,
+                              ).toISOString()}
                             >
-                              {owner.active_prs}
+                              {formatAge(data.now, item.last_accessed_at)}
                             </td>
                           </tr>
-                          {hasBlocked && (
-                            <tr class="blocked-row">
-                              <td colSpan={6}>
-                                <ul class="blocked-list mono">
-                                  {owner.blocked_blobs.map((b) => (
-                                    <li>
-                                      gc-blocked:{" "}
-                                      <a
-                                        href={`${pkgBase}/${encodeURIComponent(b.ghcr_package)}`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                      >
-                                        {b.ghcr_package}
-                                      </a>{" "}
-                                      {b.manifest_digest.slice(0, 19)}…
-                                    </li>
-                                  ))}
-                                </ul>
-                              </td>
-                            </tr>
-                          )}
-                        </>
-                      );
-                    })}
+                        );
+                      })
+                    )}
                   </tbody>
                 </table>
               </div>
-            )}
-          </section>
-        </main>
+            </section>
+
+            <section aria-labelledby="prs-heading">
+              <div class="sec-head">
+                <div class="sec-title">
+                  <h2 id="prs-heading">Active PR Overlays</h2>
+                  <span class="sec-count">{data.prs.length}</span>
+                </div>
+              </div>
+
+              {data.prs.length === 0 ? (
+                <p class="empty-line">No active PR overlays.</p>
+              ) : (
+                <div class="table-scroll">
+                  <table class="prs-table">
+                    <colgroup>
+                      <col class="col-repo" />
+                      <col class="col-count" />
+                      <col class="col-time" />
+                      <col class="col-time" />
+                      <col class="col-actions" />
+                    </colgroup>
+                    <thead>
+                      <tr>
+                        <th>Repository</th>
+                        <th class="num">Paths</th>
+                        <th class="num">Updated</th>
+                        <th class="num">TTL</th>
+                        <th class="num" aria-label="Actions" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.prs.map((pr) => {
+                        const overlayUrl = `${data.publicBaseUrl}/pr/${pr.owner_id}/${pr.repo}/${pr.pr_number}`;
+                        const ttl = formatRemainingTtl(
+                          data.now,
+                          pr.updated_at,
+                          data.gc.prTtlDays,
+                        );
+                        const ttlClass =
+                          ttl.state === "expired"
+                            ? "danger-text"
+                            : ttl.state === "warn"
+                              ? "warn-text"
+                              : "muted";
+
+                        const repoUrl = `https://github.com/${encodeURIComponent(pr.owner_id)}/${encodeURIComponent(pr.repo)}`;
+                        const prUrl = `${repoUrl}/pull/${pr.pr_number}`;
+
+                        return (
+                          <tr>
+                            <td class="mono">
+                              <a
+                                href={repoUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                <span class="muted">{pr.owner_id}/</span>
+                                <strong>{pr.repo}</strong>
+                              </a>{" "}
+                              <a
+                                class="muted"
+                                href={prUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                #{pr.pr_number}
+                              </a>
+                            </td>
+                            <td class="num mono">{pr.path_count}</td>
+                            <td
+                              class="num muted"
+                              title={new Date(
+                                pr.updated_at * 1000,
+                              ).toISOString()}
+                            >
+                              {formatAge(data.now, pr.updated_at)}
+                            </td>
+                            <td class={`num ${ttlClass}`}>{ttl.text}</td>
+                            <td class="num">
+                              <span class="row-actions">
+                                <button
+                                  type="button"
+                                  class="link-btn"
+                                  data-copy={overlayUrl}
+                                >
+                                  copy url
+                                </button>
+                                {data.adminEnabled && (
+                                  <button
+                                    type="button"
+                                    class="link-btn danger admin-only"
+                                    hidden
+                                    data-delete-pr={`${encodeURIComponent(pr.owner_id)}/${encodeURIComponent(pr.repo)}/${pr.pr_number}`}
+                                  >
+                                    remove
+                                  </button>
+                                )}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            <section aria-labelledby="owners-heading">
+              <div class="sec-head">
+                <div class="sec-title">
+                  <h2 id="owners-heading">Owners &amp; Storage</h2>
+                  <span class="sec-count">{data.owners.length}</span>
+                </div>
+              </div>
+
+              {data.owners.length === 0 ? (
+                <p class="empty-line">No owners configured.</p>
+              ) : (
+                <div class="table-scroll">
+                  <table class="owners-table">
+                    <colgroup>
+                      <col class="col-owner-name" />
+                      <col class="col-share" />
+                      <col class="col-size" />
+                      <col class="col-count" />
+                      <col class="col-count" />
+                      <col class="col-count" />
+                    </colgroup>
+                    <thead>
+                      <tr>
+                        <th>Owner</th>
+                        <th class="share-col" aria-label="Storage share" />
+                        <th class="num">Size</th>
+                        <th class="num">Blobs</th>
+                        <th class="num">Unref</th>
+                        <th class="num">PRs</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.owners.map((owner) => {
+                        const share =
+                          owner.total_bytes > 0
+                            ? Math.max(0.02, owner.total_bytes / maxOwnerBytes)
+                            : 0;
+
+                        const pkgBase =
+                          owner.owner_type === "org"
+                            ? `https://github.com/orgs/${encodeURIComponent(owner.name)}/packages/container/package`
+                            : `https://github.com/users/${encodeURIComponent(owner.name)}/packages/container/package`;
+
+                        const hasBlocked = owner.blocked_blobs.length > 0;
+
+                        return (
+                          <>
+                            <tr class={hasBlocked ? "owner-has-blocked" : ""}>
+                              <td class="mono">
+                                <span class="owner-name">
+                                  <a
+                                    href={`https://github.com/${encodeURIComponent(owner.name)}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  >
+                                    <strong>{owner.name}</strong>
+                                  </a>
+                                  <span class="faint">{owner.owner_type}</span>
+                                </span>
+                              </td>
+                              <td class="share-col">
+                                <div
+                                  class="share-bar"
+                                  style={`--share:${share.toFixed(4)}`}
+                                  aria-hidden="true"
+                                />
+                              </td>
+                              <td class="num mono">
+                                <strong>
+                                  {formatBytes(owner.total_bytes)}
+                                </strong>
+                              </td>
+                              <td class="num mono muted">
+                                {owner.total_blobs}
+                              </td>
+                              <td
+                                class={`num mono ${owner.unreferenced_blobs > 0 ? "muted" : "faint"}`}
+                              >
+                                {owner.unreferenced_blobs}
+                              </td>
+                              <td
+                                class={`num mono ${owner.active_prs > 0 ? "muted" : "faint"}`}
+                              >
+                                {owner.active_prs}
+                              </td>
+                            </tr>
+                            {hasBlocked && (
+                              <tr class="blocked-row">
+                                <td colSpan={6}>
+                                  <ul class="blocked-list mono">
+                                    {owner.blocked_blobs.map((b) => (
+                                      <li>
+                                        gc-blocked:{" "}
+                                        <a
+                                          href={`${pkgBase}/${encodeURIComponent(b.ghcr_package)}`}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                        >
+                                          {b.ghcr_package}
+                                        </a>{" "}
+                                        {b.manifest_digest.slice(0, 19)}…
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </td>
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </main>
+
+          <footer class="foot">
+            <div class="foot-brand">
+              <a
+                href="https://github.com/so1ve/firn"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Firn
+              </a>
+              <span class="mono faint">v{manifest.version}</span>
+            </div>
+            <nav class="foot-links" aria-label="Cache endpoints and links">
+              <a class="mono" href="/nix-cache-info">
+                nix-cache-info
+              </a>
+              <a class="mono" href="/api/v1/public-keys">
+                public-keys
+              </a>
+              <a
+                href="https://github.com/so1ve/firn"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                GitHub
+              </a>
+            </nav>
+          </footer>
+        </div>
         <script>{raw(CLIENT_SCRIPT)}</script>
       </body>
     </html>

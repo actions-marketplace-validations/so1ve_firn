@@ -95,7 +95,7 @@ select:focus {
 .wrap {
   width: min(100% - 2.5rem, 58rem);
   margin-inline: auto;
-  padding-block: clamp(1.75rem, 5vh, 3rem) 4rem;
+  padding-block: clamp(1.75rem, 5vh, 3rem) 2.5rem;
 }
 
 /* Header */
@@ -553,6 +553,41 @@ tr:hover .row-action,
   color: var(--muted);
   font-size: 13px;
   white-space: normal;
+}
+
+/* Footer */
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1.25rem;
+  margin-top: 3rem;
+  padding-top: 0.875rem;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.foot-brand,
+.foot-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1.125rem;
+}
+
+.foot-brand {
+  gap: 0.45rem;
+}
+
+.foot-brand a {
+  font-weight: 550;
+  color: var(--text);
+}
+
+.foot-brand a:hover {
+  color: var(--accent);
 }
 
 @media (prefers-reduced-motion: reduce) {
