@@ -27,9 +27,9 @@ inputs:
     required: false
     default: ""
   version:
-    description: Firn release tag to download (e.g. v0.1.0 or latest)
+    description: Firn version: release tag (v0.1.0), 'latest', branch/commit (main), or flake ref. Empty reuses PATH firn, then latest release, then nix build.
     required: false
-    default: latest
+    default: ""
   jobs:
     description: Number of concurrent NAR uploads
     required: false

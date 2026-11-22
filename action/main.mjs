@@ -107,9 +107,16 @@ async function downloadReleaseBinary(repo, version, asset) {
   return binPath;
 }
 
-function buildWithNix(repo) {
-  const ref = process.env.GITHUB_ACTION_REF || "main";
-  const flakeRef = `github:${repo}/${ref}`;
+function resolveFlakeRef(repo, version) {
+  if (version.includes(":") || version.startsWith(".") || version.startsWith("/")) {
+    return version;
+  }
+  const ref = version && version !== "latest" ? version : process.env.GITHUB_ACTION_REF || "main";
+
+  return `github:${repo}/${ref}`;
+}
+
+function buildWithNix(flakeRef) {
   console.log(`Building firn via nix build ${flakeRef}`);
 
   const result = spawnSync("nix", ["build", "--no-link", "--print-out-paths", flakeRef], {
@@ -132,21 +139,26 @@ function buildWithNix(repo) {
 }
 
 async function ensureFirn(version) {
-  const existing = spawnSync("which", ["firn"], { encoding: "utf8" });
-  if (existing.status === 0 && existing.stdout.trim()) {
-    return existing.stdout.trim();
-  }
-
-  const repo = process.env.GITHUB_ACTION_REPOSITORY || "so1ve/firn";
-  const asset = releaseAssetName();
-  if (asset) {
-    const downloaded = await downloadReleaseBinary(repo, version, asset);
-    if (downloaded) {
-      return downloaded;
+  if (!version) {
+    const existing = spawnSync("which", ["firn"], { encoding: "utf8" });
+    if (existing.status === 0 && existing.stdout.trim()) {
+      return existing.stdout.trim();
     }
   }
 
-  return buildWithNix(repo);
+  const repo = process.env.GITHUB_ACTION_REPOSITORY || "so1ve/firn";
+  const isRelease = !version || version === "latest" || /^v\d/.test(version);
+  if (isRelease) {
+    const asset = releaseAssetName();
+    if (asset) {
+      const downloaded = await downloadReleaseBinary(repo, version || "latest", asset);
+      if (downloaded) {
+        return downloaded;
+      }
+    }
+  }
+
+  return buildWithNix(resolveFlakeRef(repo, version));
 }
 
 async function main() {
@@ -162,7 +174,7 @@ async function main() {
   );
   const pushEnabled = getInput("push").toLowerCase() !== "false";
   const token = getInput("token");
-  const version = getInput("version") || "latest";
+  const version = getInput("version");
 
   const eventName = process.env.GITHUB_EVENT_NAME || "";
   const event = readEventPayload();
