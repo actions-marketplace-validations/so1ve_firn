@@ -1,6 +1,0 @@
-disallowed-methods = [
-  { path = "std::option::Option::map_or", reason = "Use an explicit match or if let so the fallback stays visible." },
-  { path = "std::option::Option::map_or_else", reason = "Use an explicit match or if let so the fallback stays visible." },
-  { path = "std::result::Result::map_or", reason = "Use an explicit match so the fallback stays visible." },
-  { path = "std::result::Result::map_or_else", reason = "Use an explicit match so the fallback stays visible." },
-]

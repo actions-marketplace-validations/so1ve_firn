@@ -1,16 +1,20 @@
-{ pkgs, ... }:
+{ inputs, pkgs, ... }:
 
 {
-  languages.rust = {
+  overlays = [ inputs.js-toolchain-overlay.overlays.default ];
+
+  languages.javascript = {
     enable = true;
-    toolchainFile = ./rust-toolchain.toml;
+    package = pkgs.node-bin.fromProject ./.;
+    pnpm.enable = true;
+    lsp.package = pkgs.vtsls;
   };
 
-  packages = with pkgs; [
-    actionlint
-    nixfmt-tree
-    pkg-config
-    sqlite
-    tombi
+  packages = [
+    pkgs.actionlint
+    pkgs.git
+    pkgs.nixfmt
+    pkgs.prettierd
+    pkgs.vscode-langservers-extracted
   ];
 }

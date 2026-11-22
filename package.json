@@ -1,0 +1,46 @@
+{
+  "name": "firn",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@12.11.2",
+  "author": "Ray <i@mk1.io> (https://github.com/so1ve/)",
+  "type": "module",
+  "description": "Stateful Nix binary cache backed by GHCR and Cloudflare Workers + D1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/so1ve/firn.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "firn": "./src/cli/index.ts"
+  },
+  "engines": {
+    "node": "^24.16.0 || >=26.3.0"
+  },
+  "scripts": {
+    "cf-typegen": "wrangler types",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run test",
+    "db:migrate": "wrangler d1 migrations apply firn --remote",
+    "db:migrate:local": "wrangler d1 migrations apply firn --local",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "lint": "eslint . && prettier . --check",
+    "lint:fix": "eslint . --fix && prettier . --write",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.12.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "latest",
+    "@so1ve/eslint-config": "^4.7.0",
+    "@so1ve/prettier-config": "^4.7.0",
+    "@types/node": "^25.0.0",
+    "eslint": "^10.15.0",
+    "prettier": "^3.10.1",
+    "typescript": "^5.9.0",
+    "vitest": "latest",
+    "wrangler": "latest"
+  }
+}

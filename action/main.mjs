@@ -1,10 +1,8 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import {
-  addPath,
   getInput,
   listStoreEntries,
   readEventPayload,
@@ -21,10 +19,14 @@ async function resolvePublicKeys(server, mainKeyInput, prKeyInput) {
   try {
     const response = await fetch(url);
     if (!response.ok) {
-      console.log(`::warning::Failed to fetch public keys from ${url} (${response.status})`);
+      console.log(
+        `::warning::Failed to fetch public keys from ${url} (${response.status})`,
+      );
+
       return { mainKey: mainKeyInput, prKey: prKeyInput };
     }
     const data = await response.json();
+
     return {
       mainKey: mainKeyInput || (data.main_public_key ?? "").trim(),
       prKey: prKeyInput || (data.pr_public_key ?? "").trim(),
@@ -33,6 +35,7 @@ async function resolvePublicKeys(server, mainKeyInput, prKeyInput) {
     console.log(
       `::warning::Failed to fetch public keys from ${url}: ${error instanceof Error ? error.message : String(error)}`,
     );
+
     return { mainKey: mainKeyInput, prKey: prKeyInput };
   }
 }
@@ -42,7 +45,8 @@ function configureNix(server, mainKey, prKey, { isPr, prNumber, isForkPr }) {
     return;
   }
 
-  const usePrOverlay = isPr && prNumber && prKey && !isForkPr && process.env.GITHUB_REPOSITORY;
+  const usePrOverlay =
+    isPr && prNumber && prKey && !isForkPr && process.env.GITHUB_REPOSITORY;
   const substituter = usePrOverlay
     ? `${server}/pr/${process.env.GITHUB_REPOSITORY}/${prNumber}`
     : server;
@@ -54,7 +58,8 @@ function configureNix(server, mainKey, prKey, { isPr, prNumber, isForkPr }) {
     return;
   }
 
-  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  const configHome =
+    process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
   const nixConfPath = path.join(configHome, "nix", "nix.conf");
   fs.mkdirSync(path.dirname(nixConfPath), { recursive: true });
 
@@ -67,98 +72,6 @@ function configureNix(server, mainKey, prKey, { isPr, prNumber, isForkPr }) {
   ].join("\n");
   fs.appendFileSync(nixConfPath, block);
   console.log(`Configured Nix substituter: ${substituter}`);
-}
-
-function releaseAssetName() {
-  if (process.platform !== "linux") {
-    return null;
-  }
-  if (process.arch === "x64") {
-    return "firn-x86_64-linux";
-  }
-  if (process.arch === "arm64") {
-    return "firn-aarch64-linux";
-  }
-
-  return null;
-}
-
-async function downloadReleaseBinary(repo, version, asset) {
-  const url =
-    version === "latest"
-      ? `https://github.com/${repo}/releases/latest/download/${asset}`
-      : `https://github.com/${repo}/releases/download/${version}/${asset}`;
-
-  console.log(`Downloading firn from ${url}`);
-  const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) {
-    console.log(`Release asset unavailable (${response.status}); falling back to nix build`);
-    return null;
-  }
-
-  const binDir = path.join(tempDir(), "firn-bin");
-  fs.mkdirSync(binDir, { recursive: true });
-  const binPath = path.join(binDir, "firn");
-  const bytes = Buffer.from(await response.arrayBuffer());
-  fs.writeFileSync(binPath, bytes);
-  fs.chmodSync(binPath, 0o755);
-  addPath(binDir);
-
-  return binPath;
-}
-
-function resolveFlakeRef(repo, version) {
-  if (version.includes(":") || version.startsWith(".") || version.startsWith("/")) {
-    return version;
-  }
-  const ref = version && version !== "latest" ? version : process.env.GITHUB_ACTION_REF || "main";
-
-  return `github:${repo}/${ref}`;
-}
-
-function buildWithNix(flakeRef) {
-  console.log(`Building firn via nix build ${flakeRef}`);
-
-  const result = spawnSync("nix", ["build", "--no-link", "--print-out-paths", flakeRef], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-  if (result.status !== 0) {
-    throw new Error(`nix build ${flakeRef} failed with exit code ${result.status ?? 1}`);
-  }
-
-  const outPath = result.stdout.trim().split("\n").pop();
-  if (!outPath) {
-    throw new Error(`nix build ${flakeRef} produced no output path`);
-  }
-
-  const binDir = path.join(outPath, "bin");
-  addPath(binDir);
-
-  return path.join(binDir, "firn");
-}
-
-async function ensureFirn(version) {
-  if (!version) {
-    const existing = spawnSync("which", ["firn"], { encoding: "utf8" });
-    if (existing.status === 0 && existing.stdout.trim()) {
-      return existing.stdout.trim();
-    }
-  }
-
-  const repo = process.env.GITHUB_ACTION_REPOSITORY || "so1ve/firn";
-  const isRelease = !version || version === "latest" || /^v\d/.test(version);
-  if (isRelease) {
-    const asset = releaseAssetName();
-    if (asset) {
-      const downloaded = await downloadReleaseBinary(repo, version || "latest", asset);
-      if (downloaded) {
-        return downloaded;
-      }
-    }
-  }
-
-  return buildWithNix(resolveFlakeRef(repo, version));
 }
 
 async function main() {
@@ -174,7 +87,6 @@ async function main() {
   );
   const pushEnabled = getInput("push").toLowerCase() !== "false";
   const token = getInput("token");
-  const version = getInput("version");
 
   const eventName = process.env.GITHUB_EVENT_NAME || "";
   const event = readEventPayload();
@@ -190,18 +102,21 @@ async function main() {
   if (!pushEnabled) {
     console.log("Cache push disabled by input 'push: false'");
     saveState("should_push", "false");
+
     return;
   }
 
   if (eventName === "pull_request_target") {
     console.log("::notice::Skipping Firn cache push on pull_request_target");
     saveState("should_push", "false");
+
     return;
   }
 
   if (isForkPr) {
     console.log("::notice::Skipping Firn cache push for fork pull request");
     saveState("should_push", "false");
+
     return;
   }
 
@@ -213,22 +128,25 @@ async function main() {
       "::warning::Skipping Firn cache push: neither 'token' nor GitHub Actions OIDC (permissions: id-token: write) is available",
     );
     saveState("should_push", "false");
+
     return;
   }
 
-  const firnBin = await ensureFirn(version);
-
-  const snapshotFile = path.join(tempDir(), `firn-store-before-${process.pid}.txt`);
+  const snapshotFile = path.join(
+    tempDir(),
+    `firn-store-before-${process.pid}.txt`,
+  );
   const before = listStoreEntries();
   fs.writeFileSync(snapshotFile, `${before.join("\n")}\n`);
   console.log(`Snapshotted ${before.length} existing /nix/store entries`);
 
   saveState("should_push", "true");
-  saveState("firn_bin", firnBin);
   saveState("snapshot_file", snapshotFile);
 }
 
 main().catch((error) => {
-  console.error(`::error::${error instanceof Error ? error.message : String(error)}`);
+  console.error(
+    `::error::${error instanceof Error ? error.message : String(error)}`,
+  );
   process.exit(1);
 });

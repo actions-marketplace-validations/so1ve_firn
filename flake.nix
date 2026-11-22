@@ -1,5 +1,5 @@
 {
-  description = "Stateful Nix binary cache backed by GHCR";
+  description = "Stateful Nix binary cache backed by GHCR and Cloudflare Workers + D1";
 
   nixConfig = {
     extra-substituters = [ "https://cache.so1ve.dev" ];
@@ -13,63 +13,58 @@
   outputs =
     { self, nixpkgs }:
     let
-      cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      manifest = builtins.fromJSON (builtins.readFile ./package.json);
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
       mkPackage =
         pkgs:
-        pkgs.rustPlatform.buildRustPackage {
-          pname = cargoToml.package.name;
-          inherit (cargoToml.package) version;
+        pkgs.stdenvNoCC.mkDerivation {
+          pname = manifest.name;
+          inherit (manifest) version;
 
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
-              ./Cargo.lock
-              ./Cargo.toml
-              ./src
+              ./package.json
+              ./src/cli
+              ./src/shared
             ];
           };
 
-          cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
 
-          nativeBuildInputs = with pkgs; [
-            installShellFiles
-            pkg-config
-          ];
+          installPhase = ''
+            runHook preInstall
 
-          buildInputs = with pkgs; [
-            aws-lc
-            sqlite
-            zstd
-          ];
+            mkdir -p "$out/bin" "$out/share/firn"
+            cp -r package.json src "$out/share/firn"
 
-          nativeCheckInputs = with pkgs; [
-            cacert
-          ];
+            makeWrapper ${pkgs.lib.getExe pkgs.nodejs_24} "$out/bin/firn" \
+              --add-flags "$out/share/firn/src/cli/index.ts" \
+              --prefix PATH : ${
+                pkgs.lib.makeBinPath [
+                  pkgs.nix
+                  pkgs.nodejs_24
+                ]
+              }
 
-          postInstall = ''
-            installShellCompletion --cmd firn \
-              --bash <("$out/bin/firn" completions bash) \
-              --fish <("$out/bin/firn" completions fish) \
-              --zsh <("$out/bin/firn" completions zsh)
+            runHook postInstall
           '';
 
           meta = {
-            inherit (cargoToml.package) description;
-            homepage = cargoToml.package.repository;
+            inherit (manifest) description;
+            homepage = "https://github.com/so1ve/firn";
             license = pkgs.lib.licenses.mit;
-            mainProgram = cargoToml.package.name;
-            platforms = pkgs.lib.platforms.linux;
+            mainProgram = manifest.name;
+            platforms = pkgs.lib.platforms.unix;
           };
         };
     in
     {
-      nixosModules.default = import ./nix/nixos.nix self;
-
       packages = forAllSystems (
         system:
         let
@@ -88,7 +83,7 @@
           app = {
             type = "app";
             program = nixpkgs.lib.getExe self.packages.${system}.firn;
-            meta.description = cargoToml.package.description;
+            meta.description = manifest.description;
           };
         in
         {

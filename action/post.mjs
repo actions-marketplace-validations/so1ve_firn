@@ -1,17 +1,20 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 
 import { getInput, getState, listStoreEntries } from "./common.mjs";
+
+const CLI_ENTRY = path.resolve(import.meta.dirname, "../src/cli/index.ts");
 
 function main() {
   if (getState("should_push") !== "true") {
     return;
   }
 
-  const firnBin = getState("firn_bin") || "firn";
   const snapshotFile = getState("snapshot_file");
   if (!snapshotFile || !fs.existsSync(snapshotFile)) {
     console.log("::warning::Firn store snapshot missing; skipping push");
+
     return;
   }
 
@@ -30,6 +33,7 @@ function main() {
 
   if (newPaths.length === 0) {
     console.log("No new Nix store paths to push.");
+
     return;
   }
 
@@ -38,9 +42,10 @@ function main() {
   const token = getInput("token");
   const jobs = getInput("jobs");
   const includeUpstream = getInput("include-upstream").toLowerCase() === "true";
-  const githubToken = getInput("github-token") || process.env.GITHUB_TOKEN || "";
+  const githubToken =
+    getInput("github-token") || process.env.GITHUB_TOKEN || "";
 
-  const args = ["push", "--server", server, "--stdin"];
+  const args = [CLI_ENTRY, "push", "--server", server, "--stdin"];
   if (owner) {
     args.push("--owner", owner);
   }
@@ -54,8 +59,10 @@ function main() {
     args.push("--include-upstream");
   }
 
-  console.log(`Pushing ${newPaths.length} newly built Nix store paths to ${server}`);
-  const result = spawnSync(firnBin, args, {
+  console.log(
+    `Pushing ${newPaths.length} newly built Nix store paths to ${server}`,
+  );
+  const result = spawnSync(process.execPath, args, {
     input: `${newPaths.join("\n")}\n`,
     stdio: ["pipe", "inherit", "inherit"],
     env: {
@@ -75,6 +82,8 @@ function main() {
 try {
   main();
 } catch (error) {
-  console.error(`::error::${error instanceof Error ? error.message : String(error)}`);
+  console.error(
+    `::error::${error instanceof Error ? error.message : String(error)}`,
+  );
   process.exit(1);
 }

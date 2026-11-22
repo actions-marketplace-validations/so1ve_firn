@@ -1,61 +1,97 @@
 # Firn
 
-Stateful Nix binary cache backed by GHCR. Metadata, signing, and GC live in
-SQLite; compressed NAR blobs go directly between clients and GHCR via 302 CDN
-redirects.
+Stateful Nix binary cache backed by GHCR, running on Cloudflare Workers (Hono +
+D1) with a zero-dependency local Node.js CLI.
 
-## Setup
+Metadata, signing, and GC state live in Cloudflare D1 and compressed NAR blobs go
+directly between clients and GHCR via 302 CDN redirects.
 
-Generate separate main and PR signing keys:
+## Install CLI
+
+Requires Nix (runs directly on Node.js 24+ built-ins, no extra build
+dependencies):
+
+```sh
+# Run once
+nix run github:so1ve/firn -- --help
+
+# Or use nix shell
+nix shell github:so1ve/firn
+```
+
+In a NixOS or Home Manager flake, add `inputs.firn.url = "github:so1ve/firn"`
+and include `inputs.firn.packages.${system}.default` in `environment.systemPackages`.
+
+## Deploy (Cloudflare Workers + D1)
+
+### 1. Generate signing keys
+
+Generate two Ed25519 key pairs: one for the main cache and one for pull request
+overlays.
 
 ```sh
 firn keygen cache.example.com-1 -s main.key -p main.pub
 firn keygen cache.example.com-pr-1 -s pr.key -p pr.pub
 ```
 
-Minimal config ([full reference](firn.example.toml)):
+### 2. Configure `wrangler.jsonc` and create D1
 
-```toml
-database_path = "/var/lib/firn/state.db"
-public_base_url = "https://cache.example.com"
-main_signing_key_file = "/run/secrets/firn-main.key"
-pr_signing_key_file = "/run/secrets/firn-pr.key"
-
-[[owners]]
-name = "so1ve"
-github_owner_id = 58381667
-```
-
-Run directly, with Docker, or via the NixOS module (`inputs.firn.nixosModules.default`):
+Create the D1 database and apply the schema migration:
 
 ```sh
-firn serve
+pnpm exec wrangler d1 create firn
+pnpm run db:migrate
 ```
+
+Update `database_id`, `routes`, and `vars` in [wrangler.jsonc](wrangler.jsonc):
+
+- `PUBLIC_BASE_URL`: public HTTPS URL of the cache (also used as the OIDC
+  audience).
+- `GC_PR_TTL_DAYS` / `GC_MAIN_LRU_DAYS`: PR expiry (default `3`) and
+  closure-safe main LRU (default `15`).
+- `GITHUB_APP_ID`: numeric GitHub App ID (optional; required for GHCR GC
+  deletion and local manual pushes).
+- `OWNERS_JSON`: JSON array of allowed GitHub users/orgs, for example:
+
+```json
+[
+  {
+    "name": "so1ve",
+    "owner_type": "user",
+    "github_owner_id": 58381667,
+    "github_installation_id": 98765432,
+    "package_template": "{repo}-cache",
+    "manual_push_package": "manual-cache",
+    "protected_refs": ["refs/heads/main"],
+    "allowed_repos": []
+  }
+]
+```
+
+> If you set up a GitHub App for GC and webhooks, grant **Packages: Read &
+> write** and **Pull requests: Read-only**, subscribe to `Pull request` events,
+> and point the webhook URL to `https://cache.example.com/api/v1/webhooks/github`.
+
+### 3. Upload secrets and deploy
+
+See [.dev.vars.example](.dev.vars.example) for local development. In production,
+set secrets via Wrangler and deploy:
 
 ```sh
-docker run --rm -p 8080:8080 \
-  -v /etc/firn/config.toml:/etc/firn/config.toml:ro \
-  -v /run/secrets:/run/secrets:ro \
-  -v firn-data:/var/lib/firn \
-  ghcr.io/so1ve/firn:main
-```
-
-```nix
-services.firn = {
-  enable = true;
-  settings = {
-    public_base_url = "https://cache.example.com";
-    main_signing_key_file = "/run/secrets/firn-main.key";
-    pr_signing_key_file = "/run/secrets/firn-pr.key";
-    owners = [{ name = "so1ve"; github_owner_id = 58381667; }];
-  };
-};
+pnpm exec wrangler secret put MAIN_SIGNING_KEY < main.key
+pnpm exec wrangler secret put PR_SIGNING_KEY < pr.key
+pnpm exec wrangler secret put GITHUB_APP_PRIVATE_KEY < github-app.pem
+pnpm exec wrangler secret put GITHUB_WEBHOOK_SECRET
+pnpm exec wrangler secret put MANUAL_TOKENS_JSON
+pnpm exec wrangler secret put ADMIN_TOKEN
+pnpm run deploy
 ```
 
 ## GitHub Actions
 
 Uses OIDC (`id-token: write`) with no repository secrets. Public keys are
-fetched from `/api/v1/public-keys` automatically.
+fetched automatically from `/api/v1/public-keys`, and the action runs directly
+on Node 24 with no binary download.
 
 ```yaml
 permissions:
@@ -72,34 +108,64 @@ steps:
   - run: nix flake check
 ```
 
-- `protected_refs` (default `refs/heads/main`, no GitHub branch protection required) push to the main cache.
-- Internal `pull_request` jobs pull from and push to `/pr/<owner>/<repo>/<number>`. Fork PRs only pull from the main cache.
+- `protected_refs` (default `refs/heads/main`, no GitHub branch protection
+  required) push to the main cache.
+- Internal `pull_request` jobs pull from and push to
+  `/pr/<owner>/<repo>/<number>`. Fork PRs only pull from the main cache.
 
-## Pull & Manual Push
+## Pull
 
-Client `nix.conf`:
+Add the cache and main public key to `nix.conf` (or `flake.nix` `nixConfig`):
 
 ```text
 extra-substituters = https://cache.example.com
 extra-trusted-public-keys = cache.example.com-1:<MAIN_PUBLIC_KEY>
 ```
 
-Local push (requires `manual_tokens_file` and `[github_app]`):
+## Local Push
+
+To push store paths from a local machine, configure `MANUAL_TOKENS_JSON` (for
+example `{"so1ve":["<random-token>"]}`) and a GitHub App installation for the
+owner. Firn exchanges a short-lived scoped GHCR upload token on demand.
 
 ```sh
-firn push --server https://cache.example.com --token "$FIRN_TOKEN" ./result
+export FIRN_SERVER=https://cache.example.com
+export FIRN_TOKEN=<manual-token>
+
+firn push ./result
+# Or pipe paths from stdin (already-signed cache.nixos.org paths are skipped):
+nix build .#default --print-out-paths | firn push --stdin
 ```
 
-## CLI
+Use `--owner <name>` only if the same token is shared across multiple owners,
+`--jobs <n>` to control upload concurrency (default `4`), and
+`--include-upstream` to upload paths already signed by `cache.nixos.org-1:`.
 
-Defaults to `/etc/firn/config.toml` (override with `-c` / `--config` or `FIRN_CONFIG`; logs via `RUST_LOG`):
+## Remote Administration
+
+When `ADMIN_TOKEN` is configured on the Worker, the local CLI can inspect and
+manage the remote D1 cache from any machine (pass `--server` / `--token` or set
+`FIRN_SERVER` / `FIRN_ADMIN_TOKEN`):
 
 ```sh
+export FIRN_SERVER=https://cache.example.com
+export FIRN_ADMIN_TOKEN=<admin-token>
+
+# Overview: public keys, GC policy, store path counts, per-owner blob usage & gc-blocked list
 firn status
+
+# List recently accessed store paths (optional: --owner <name>, --scope main|pr:<owner>:<repo>:<n>)
 firn ls --limit 50
+
+# List active PR overlays and remaining TTL
 firn pr ls
+
+# Remove a PR overlay immediately (unreferenced blobs are cleaned on next GC)
 firn pr rm so1ve latchshot 7
+
+# Trigger GC on demand (add --dry-run to preview without mutating D1 or GHCR)
 firn gc --dry-run
+firn gc
 ```
 
 ## License

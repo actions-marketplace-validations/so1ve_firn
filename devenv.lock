@@ -17,6 +17,26 @@
         "type": "github"
       }
     },
+    "js-toolchain-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1795375280,
+        "narHash": "sha256-TAAE+jpSdTOPnhqzguQdBTUVykRnA56i3OGGWC6P8m4=",
+        "owner": "so1ve",
+        "repo": "js-toolchain-overlay",
+        "rev": "db139d69d2cef6c0732e7d5d085411670f87c826",
+        "type": "github"
+      },
+      "original": {
+        "owner": "so1ve",
+        "repo": "js-toolchain-overlay",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "inputs": {
         "nixpkgs-src": "nixpkgs-src"
@@ -56,28 +76,8 @@
     "root": {
       "inputs": {
         "devenv": "devenv",
-        "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
-      }
-    },
-    "rust-overlay": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1795340093,
-        "narHash": "sha256-fosvQ7eeQMrh6RvUXotBc6d92dHskAI6tu1EERJQ2LY=",
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "rev": "5aa410a1df0e4e9c25f3818320651c2bddf66aff",
-        "type": "github"
-      },
-      "original": {
-        "owner": "oxalica",
-        "repo": "rust-overlay",
-        "type": "github"
+        "js-toolchain-overlay": "js-toolchain-overlay",
+        "nixpkgs": "nixpkgs"
       }
     }
   },

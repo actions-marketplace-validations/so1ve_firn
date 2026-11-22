@@ -26,10 +26,6 @@ inputs:
     description: Static Bearer token for manual authentication (omit to use GitHub Actions OIDC)
     required: false
     default: ""
-  version:
-    description: Firn version: release tag (v0.1.0), 'latest', branch/commit (main), or flake ref. Empty reuses PATH firn, then latest release, then nix build.
-    required: false
-    default: ""
   jobs:
     description: Number of concurrent NAR uploads
     required: false

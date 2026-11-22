@@ -1,3 +1,7 @@
-/target
-.direnv
-.devenv
+node_modules/
+.wrangler/
+.dev.vars
+.devenv/
+.direnv/
+dist/
+result
