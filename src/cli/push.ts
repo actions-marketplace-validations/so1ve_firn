@@ -19,7 +19,7 @@ import type {
   PlanRequest,
   PlanResponse,
 } from "../shared/protocol.ts";
-import { err, formatBytes, out } from "./format.ts";
+import { err, formatBytes, formatStorePath, out } from "./format.ts";
 
 const execFileAsync = promisify(execFile);
 // Keep each commit batch safely below Cloudflare Workers' 50-subrequest limit
@@ -417,11 +417,8 @@ export async function runPush(options: PushOptions): Promise<void> {
         );
         uploadedCount += 1;
         uploadedBytes += entry.file_size;
-        const baseName = info.path.startsWith("/nix/store/")
-          ? info.path.slice("/nix/store/".length + 33)
-          : info.path;
         console.error(
-          `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${baseName} ${err.dim(`(${formatBytes(entry.file_size)})`)}`,
+          `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${formatStorePath(info.path, err)} ${err.dim(`(${formatBytes(entry.file_size)})`)}`,
         );
 
         return entry;

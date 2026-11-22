@@ -37,12 +37,12 @@ export function createStyler(stream: NodeJS.WriteStream = process.stdout) {
 export const out = createStyler(process.stdout);
 export const err = createStyler(process.stderr);
 
-export function formatStorePath(storePath: string): string {
+export function formatStorePath(storePath: string, styler = out): string {
   const { hash, name } = splitStorePath(storePath);
   if (hash) {
     const prefix = storePath.startsWith("/nix/store/") ? "/nix/store/" : "";
 
-    return `${out.dim(`${prefix}${hash}-`)}${name}`;
+    return `${styler.dim(`${prefix}${hash}-`)}${name}`;
   }
 
   return storePath;
