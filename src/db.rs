@@ -11,13 +11,14 @@ use crate::nix_format::{NarInfo, store_path_basename};
 pub const MAIN_SCOPE: &str = "main";
 
 #[must_use]
-pub fn pr_scope(repo: &str, pr_number: u64) -> String {
-    format!("pr:{repo}:{pr_number}")
+pub fn pr_scope(owner_id: &str, repo: &str, pr_number: u64) -> String {
+    format!("pr:{owner_id}:{repo}:{pr_number}")
 }
 
 #[derive(Debug, Clone)]
 pub struct BlobRecord {
     pub id: i64,
+    pub owner_id: String,
     pub ghcr_package: String,
     pub manifest_digest: String,
     pub blob_digest: String,
@@ -31,9 +32,14 @@ pub struct BlockedBlob {
 }
 
 #[derive(Debug, Clone)]
-pub struct OwnerStats {
+pub struct CacheStats {
     pub main_paths: usize,
     pub pr_paths: usize,
+    pub active_prs: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct OwnerStats {
     pub active_prs: usize,
     pub total_blobs: usize,
     pub total_bytes: u64,
@@ -119,19 +125,20 @@ struct MainNode {
 fn map_blob_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlobRecord> {
     Ok(BlobRecord {
         id: row.get(0)?,
-        ghcr_package: row.get(1)?,
-        manifest_digest: row.get(2)?,
-        blob_digest: row.get(3)?,
+        owner_id: row.get(1)?,
+        ghcr_package: row.get(2)?,
+        manifest_digest: row.get(3)?,
+        blob_digest: row.get(4)?,
     })
 }
 
-fn load_main_nodes(conn: &Connection, owner_id: &str) -> Result<Vec<MainNode>> {
+fn load_main_nodes(conn: &Connection) -> Result<Vec<MainNode>> {
     let mut stmt = conn.prepare(
         "SELECT id, store_path, last_accessed_at, references_json
          FROM store_paths
-         WHERE owner_id = ?1 AND scope = 'main'",
+         WHERE scope = 'main'",
     )?;
-    let rows = stmt.query_map(params![owner_id], |row| {
+    let rows = stmt.query_map([], |row| {
         let id: i64 = row.get(0)?;
         let store_path: String = row.get(1)?;
         let last_accessed_at: i64 = row.get(2)?;
@@ -153,7 +160,6 @@ fn load_main_nodes(conn: &Connection, owner_id: &str) -> Result<Vec<MainNode>> {
 
 fn query_narinfo_in_scope(
     conn: &Connection,
-    owner_id: &str,
     scope: &str,
     store_hash: &str,
 ) -> Result<Option<StoredNarInfo>> {
@@ -162,11 +168,11 @@ fn query_narinfo_in_scope(
                 b.file_size, b.blob_digest, sp.deriver, sp.references_json, sp.signature
          FROM store_paths sp
          JOIN blobs b ON b.id = sp.blob_id
-         WHERE sp.owner_id = ?1 AND sp.scope = ?2 AND sp.store_hash = ?3",
+         WHERE sp.scope = ?1 AND sp.store_hash = ?2",
     )?;
 
     let result = stmt
-        .query_row(params![owner_id, scope, store_hash], |row| {
+        .query_row(params![scope, store_hash], |row| {
             let nar_size: i64 = row.get(3)?;
             let file_size: i64 = row.get(5)?;
             let refs_json: String = row.get(8)?;
@@ -215,12 +221,14 @@ impl Database {
                 UNIQUE(owner_id, ghcr_package, blob_digest)
             );
 
-            CREATE INDEX IF NOT EXISTS idx_blobs_owner_digest
-                ON blobs(owner_id, blob_digest);
+            CREATE INDEX IF NOT EXISTS idx_blobs_digest
+                ON blobs(blob_digest);
+
+            CREATE INDEX IF NOT EXISTS idx_blobs_owner
+                ON blobs(owner_id);
 
             CREATE TABLE IF NOT EXISTS store_paths (
                 id               INTEGER PRIMARY KEY,
-                owner_id         TEXT NOT NULL,
                 scope            TEXT NOT NULL,
                 store_hash       TEXT NOT NULL,
                 store_path       TEXT NOT NULL,
@@ -233,11 +241,11 @@ impl Database {
                 signature        TEXT NOT NULL,
                 created_at       INTEGER NOT NULL,
                 last_accessed_at INTEGER NOT NULL,
-                UNIQUE(owner_id, scope, store_hash)
+                UNIQUE(scope, store_hash)
             );
 
-            CREATE INDEX IF NOT EXISTS idx_store_paths_owner_scope_hash
-                ON store_paths(owner_id, scope, store_hash);
+            CREATE INDEX IF NOT EXISTS idx_store_paths_scope_hash
+                ON store_paths(scope, store_hash);
 
             CREATE INDEX IF NOT EXISTS idx_store_paths_blob_id
                 ON store_paths(blob_id);
@@ -284,20 +292,15 @@ impl Database {
         Self::init_connection(conn)
     }
 
-    pub fn existing_store_hashes(
-        &self,
-        owner_id: &str,
-        scope: &str,
-        hashes: &[String],
-    ) -> Result<HashSet<String>> {
+    pub fn existing_store_hashes(&self, scope: &str, hashes: &[String]) -> Result<HashSet<String>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
             "SELECT 1 FROM store_paths
-             WHERE owner_id = ?1 AND (scope = ?2 OR scope = 'main') AND store_hash = ?3",
+             WHERE (scope = ?1 OR scope = 'main') AND store_hash = ?2",
         )?;
         let mut present = HashSet::new();
         for hash in hashes {
-            if stmt.exists(params![owner_id, scope, hash])? {
+            if stmt.exists(params![scope, hash])? {
                 present.insert(hash.clone());
             }
         }
@@ -343,11 +346,11 @@ impl Database {
 
             tx.execute(
                 "INSERT INTO store_paths (
-                    owner_id, scope, store_hash, store_path, nar_hash, nar_size,
+                    scope, store_hash, store_path, nar_hash, nar_size,
                     file_hash, blob_id, deriver, references_json, signature,
                     created_at, last_accessed_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
-                ON CONFLICT(owner_id, scope, store_hash) DO UPDATE SET
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+                ON CONFLICT(scope, store_hash) DO UPDATE SET
                     store_path = excluded.store_path,
                     nar_hash = excluded.nar_hash,
                     nar_size = excluded.nar_size,
@@ -358,7 +361,6 @@ impl Database {
                     signature = excluded.signature,
                     last_accessed_at = excluded.last_accessed_at",
                 params![
-                    record.owner_id,
                     record.scope,
                     record.store_hash,
                     record.store_path,
@@ -389,41 +391,34 @@ impl Database {
         Ok(records.len())
     }
 
-    pub fn get_narinfo(
-        &self,
-        owner_id: &str,
-        scope: &str,
-        store_hash: &str,
-    ) -> Result<Option<StoredNarInfo>> {
+    pub fn get_narinfo(&self, scope: &str, store_hash: &str) -> Result<Option<StoredNarInfo>> {
         let conn = self.lock();
         if scope != MAIN_SCOPE
-            && let Some(found) = query_narinfo_in_scope(&conn, owner_id, scope, store_hash)?
+            && let Some(found) = query_narinfo_in_scope(&conn, scope, store_hash)?
         {
             return Ok(Some(found));
         }
 
-        query_narinfo_in_scope(&conn, owner_id, MAIN_SCOPE, store_hash)
+        query_narinfo_in_scope(&conn, MAIN_SCOPE, store_hash)
     }
 
     pub fn get_blob_for_download(
         &self,
-        owner_id: &str,
         scope: &str,
         blob_digest: &str,
     ) -> Result<Option<BlobRecord>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT b.id, b.ghcr_package, b.manifest_digest, b.blob_digest
+            "SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest
              FROM blobs b
              JOIN store_paths sp ON sp.blob_id = b.id
-             WHERE b.owner_id = ?1
-               AND b.blob_digest = ?2
-               AND (sp.scope = ?3 OR sp.scope = 'main')
+             WHERE b.blob_digest = ?1
+               AND (sp.scope = ?2 OR sp.scope = 'main')
              LIMIT 1",
         )?;
 
         Ok(stmt
-            .query_row(params![owner_id, blob_digest, scope], map_blob_row)
+            .query_row(params![blob_digest, scope], map_blob_row)
             .optional()?)
     }
 
@@ -444,14 +439,11 @@ impl Database {
     }
 
     pub fn delete_pr_scope(&self, owner_id: &str, repo: &str, pr_number: u64) -> Result<usize> {
-        let scope = pr_scope(repo, pr_number);
+        let scope = pr_scope(owner_id, repo, pr_number);
         let mut conn = self.lock();
         let tx = conn.transaction()?;
 
-        let removed = tx.execute(
-            "DELETE FROM store_paths WHERE owner_id = ?1 AND scope = ?2",
-            params![owner_id, scope],
-        )?;
+        let removed = tx.execute("DELETE FROM store_paths WHERE scope = ?1", params![scope])?;
         tx.execute(
             "DELETE FROM pr_scopes WHERE owner_id = ?1 AND repo = ?2 AND pr_number = ?3",
             params![owner_id, repo, pr_number as i64],
@@ -461,23 +453,17 @@ impl Database {
         Ok(removed)
     }
 
-    pub fn evict_expired_pr_scopes(
-        &self,
-        owner_id: &str,
-        cutoff_ts: i64,
-        dry_run: bool,
-    ) -> Result<usize> {
+    pub fn evict_expired_pr_scopes(&self, cutoff_ts: i64, dry_run: bool) -> Result<usize> {
         let mut conn = self.lock();
         if dry_run {
             let count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM store_paths
-                 WHERE owner_id = ?1
-                   AND scope IN (
-                       SELECT 'pr:' || repo || ':' || pr_number
-                       FROM pr_scopes
-                       WHERE owner_id = ?1 AND updated_at < ?2
-                   )",
-                params![owner_id, cutoff_ts],
+                 WHERE scope IN (
+                     SELECT 'pr:' || owner_id || ':' || repo || ':' || pr_number
+                     FROM pr_scopes
+                     WHERE updated_at < ?1
+                 )",
+                params![cutoff_ts],
                 |row| row.get(0),
             )?;
 
@@ -487,17 +473,16 @@ impl Database {
         let tx = conn.transaction()?;
         let removed = tx.execute(
             "DELETE FROM store_paths
-             WHERE owner_id = ?1
-               AND scope IN (
-                   SELECT 'pr:' || repo || ':' || pr_number
-                   FROM pr_scopes
-                   WHERE owner_id = ?1 AND updated_at < ?2
-               )",
-            params![owner_id, cutoff_ts],
+             WHERE scope IN (
+                 SELECT 'pr:' || owner_id || ':' || repo || ':' || pr_number
+                 FROM pr_scopes
+                 WHERE updated_at < ?1
+             )",
+            params![cutoff_ts],
         )?;
         tx.execute(
-            "DELETE FROM pr_scopes WHERE owner_id = ?1 AND updated_at < ?2",
-            params![owner_id, cutoff_ts],
+            "DELETE FROM pr_scopes WHERE updated_at < ?1",
+            params![cutoff_ts],
         )?;
         tx.commit()?;
 
@@ -506,14 +491,9 @@ impl Database {
 
     /// Evicts stale main-scope store paths whose `last_accessed_at < cutoff_ts`
     /// while preserving every transitive dependency of retained paths.
-    pub fn evict_stale_main_paths(
-        &self,
-        owner_id: &str,
-        cutoff_ts: i64,
-        dry_run: bool,
-    ) -> Result<usize> {
+    pub fn evict_stale_main_paths(&self, cutoff_ts: i64, dry_run: bool) -> Result<usize> {
         let mut conn = self.lock();
-        let nodes = load_main_nodes(&conn, owner_id)?;
+        let nodes = load_main_nodes(&conn)?;
 
         let index_by_basename: HashMap<&str, usize> = nodes
             .iter()
@@ -566,7 +546,7 @@ impl Database {
     pub fn list_unreferenced_blobs(&self, owner_id: &str) -> Result<Vec<BlobRecord>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT b.id, b.ghcr_package, b.manifest_digest, b.blob_digest
+            "SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest
              FROM blobs b
              WHERE b.owner_id = ?1
                AND b.gc_blocked = 0
@@ -600,19 +580,31 @@ impl Database {
         Ok(())
     }
 
-    pub fn owner_stats(&self, owner_id: &str) -> Result<OwnerStats> {
+    pub fn cache_stats(&self) -> Result<CacheStats> {
         let conn = self.lock();
-
         let main_paths: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM store_paths WHERE owner_id = ?1 AND scope = 'main'",
-            params![owner_id],
+            "SELECT COUNT(*) FROM store_paths WHERE scope = 'main'",
+            [],
             |row| row.get(0),
         )?;
         let pr_paths: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM store_paths WHERE owner_id = ?1 AND scope != 'main'",
-            params![owner_id],
+            "SELECT COUNT(*) FROM store_paths WHERE scope != 'main'",
+            [],
             |row| row.get(0),
         )?;
+        let active_prs: i64 =
+            conn.query_row("SELECT COUNT(*) FROM pr_scopes", [], |row| row.get(0))?;
+
+        Ok(CacheStats {
+            main_paths: main_paths as usize,
+            pr_paths: pr_paths as usize,
+            active_prs: active_prs as usize,
+        })
+    }
+
+    pub fn owner_stats(&self, owner_id: &str) -> Result<OwnerStats> {
+        let conn = self.lock();
+
         let active_prs: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pr_scopes WHERE owner_id = ?1",
             params![owner_id],
@@ -649,8 +641,6 @@ impl Database {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(OwnerStats {
-            main_paths: main_paths as usize,
-            pr_paths: pr_paths as usize,
             active_prs: active_prs as usize,
             total_blobs: total_blobs as usize,
             total_bytes: total_bytes as u64,
@@ -667,10 +657,10 @@ impl Database {
     ) -> Result<Vec<StorePathSummary>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT sp.owner_id, sp.scope, sp.store_path, b.file_size, sp.last_accessed_at
+            "SELECT b.owner_id, sp.scope, sp.store_path, b.file_size, sp.last_accessed_at
              FROM store_paths sp
              JOIN blobs b ON b.id = sp.blob_id
-             WHERE (?1 IS NULL OR sp.owner_id = ?1)
+             WHERE (?1 IS NULL OR b.owner_id = ?1)
                AND (?2 IS NULL OR sp.scope = ?2)
              ORDER BY sp.last_accessed_at DESC, sp.id DESC
              LIMIT ?3",
@@ -696,8 +686,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT p.owner_id, p.repo, p.pr_number, p.updated_at,
                     (SELECT COUNT(*) FROM store_paths sp
-                     WHERE sp.owner_id = p.owner_id
-                       AND sp.scope = 'pr:' || p.repo || ':' || p.pr_number)
+                     WHERE sp.scope = 'pr:' || p.owner_id || ':' || p.repo || ':' || p.pr_number)
              FROM pr_scopes p
              WHERE (?1 IS NULL OR p.owner_id = ?1)
              ORDER BY p.updated_at DESC",
@@ -787,22 +776,10 @@ mod tests {
 
         db.commit_entries(&[dep, live, orphan]).unwrap();
 
-        assert_eq!(db.evict_stale_main_paths("so1ve", 300, false).unwrap(), 1);
-        assert!(
-            db.get_narinfo("so1ve", MAIN_SCOPE, dep_hash)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            db.get_narinfo("so1ve", MAIN_SCOPE, live_hash)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            db.get_narinfo("so1ve", MAIN_SCOPE, orphan_hash)
-                .unwrap()
-                .is_none()
-        );
+        assert_eq!(db.evict_stale_main_paths(300, false).unwrap(), 1);
+        assert!(db.get_narinfo(MAIN_SCOPE, dep_hash).unwrap().is_some());
+        assert!(db.get_narinfo(MAIN_SCOPE, live_hash).unwrap().is_some());
+        assert!(db.get_narinfo(MAIN_SCOPE, orphan_hash).unwrap().is_none());
 
         let unreferenced = db.list_unreferenced_blobs("so1ve").unwrap();
         assert_eq!(unreferenced.len(), 1);
@@ -815,7 +792,7 @@ mod tests {
     #[test]
     fn expired_pr_scopes_evict_cleanly_in_dry_run_and_apply() {
         let db = Database::open_in_memory().unwrap();
-        let pr = pr_scope("latchshot", 42);
+        let pr = pr_scope("so1ve", "latchshot", 42);
         let mut pr_entry = sample_record(
             &pr,
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -827,16 +804,16 @@ mod tests {
         pr_entry.pr_info = Some(("latchshot", 42));
         db.commit_entries(&[pr_entry]).unwrap();
 
-        assert_eq!(db.evict_expired_pr_scopes("so1ve", 200, true).unwrap(), 1);
+        assert_eq!(db.evict_expired_pr_scopes(200, true).unwrap(), 1);
         assert!(
-            db.get_narinfo("so1ve", &pr, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            db.get_narinfo(&pr, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .unwrap()
                 .is_some()
         );
 
-        assert_eq!(db.evict_expired_pr_scopes("so1ve", 200, false).unwrap(), 1);
+        assert_eq!(db.evict_expired_pr_scopes(200, false).unwrap(), 1);
         assert!(
-            db.get_narinfo("so1ve", &pr, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            db.get_narinfo(&pr, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .unwrap()
                 .is_none()
         );

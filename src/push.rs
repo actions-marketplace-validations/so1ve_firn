@@ -26,8 +26,8 @@ pub struct PushArgs {
     #[arg(long, env = "FIRN_SERVER")]
     server: String,
 
-    /// Cache owner name (required for manual token pushes; optional in OIDC
-    /// mode)
+    /// GitHub owner name (optional unless needed to disambiguate a shared
+    /// manual token)
     #[arg(long, env = "FIRN_OWNER")]
     owner: Option<String>,
 
@@ -72,7 +72,7 @@ struct NixPathInfo {
 }
 
 enum AuthMode {
-    Manual { owner: String, bearer: String },
+    Manual { bearer: String },
     Oidc { jwt: String, github_token: String },
 }
 
@@ -197,12 +197,7 @@ fn collect_input_paths(args: &PushArgs) -> Result<Vec<String>> {
 
 async fn resolve_auth(http: &Client, server_url: &str, args: &PushArgs) -> Result<AuthMode> {
     if let Some(token) = &args.token {
-        let Some(owner) = &args.owner else {
-            bail!("--owner (or FIRN_OWNER) is required when authenticating with --token");
-        };
-
         return Ok(AuthMode::Manual {
-            owner: owner.clone(),
             bearer: token.clone(),
         });
     }
@@ -436,9 +431,9 @@ pub async fn run(args: PushArgs) -> Result<()> {
         .unwrap();
 
     let auth = resolve_auth(&http, server_url, &args).await?;
-    let (auth_token, request_owner) = match &auth {
-        AuthMode::Manual { owner, bearer } => (bearer.as_str(), Some(owner.clone())),
-        AuthMode::Oidc { jwt, .. } => (jwt.as_str(), args.owner.clone()),
+    let auth_token = match &auth {
+        AuthMode::Manual { bearer } => bearer.as_str(),
+        AuthMode::Oidc { jwt, .. } => jwt.as_str(),
     };
 
     let plan: PlanResponse = post_json(
@@ -446,7 +441,7 @@ pub async fn run(args: PushArgs) -> Result<()> {
         &format!("{server_url}/api/v1/uploads/plan"),
         auth_token,
         &PlanRequest {
-            owner: request_owner.clone(),
+            owner: args.owner.clone(),
             store_paths: candidates.iter().map(|item| item.path.clone()).collect(),
         },
     )
@@ -504,15 +499,15 @@ pub async fn run(args: PushArgs) -> Result<()> {
         &format!("{server_url}/api/v1/uploads/commit"),
         auth_token,
         &CommitRequest {
-            owner: request_owner,
+            owner: args.owner,
             entries,
         },
     )
     .await?;
 
     println!(
-        "Committed {} store paths to {}/{} ({})",
-        committed.committed, server_url, committed.owner, committed.scope
+        "Committed {} store paths to {} (scope={}, owner={})",
+        committed.committed, server_url, committed.scope, committed.owner
     );
 
     Ok(())

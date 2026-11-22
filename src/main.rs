@@ -83,7 +83,7 @@ enum Command {
         #[arg(long)]
         owner: Option<String>,
 
-        /// Filter by scope (e.g. main or pr:<repo>:<number>)
+        /// Filter by scope (e.g. main or pr:<owner>:<repo>:<number>)
         #[arg(long)]
         scope: Option<String>,
 

@@ -1,6 +1,6 @@
 # Complete Firn configuration reference.
 # Fields marked (required) must be set; all other fields show their defaults
-# or are commented out when optional.
+# or are optional.
 
 # Socket address the HTTP server binds to.
 # Optional. Default: "127.0.0.1:8080"
@@ -14,6 +14,15 @@ database_path = "/var/lib/firn/state.db"
 # Also used as the expected OIDC audience (`aud`) for GitHub Actions uploads.
 # Required.
 public_base_url = "https://cache.example.com"
+
+# Path to the Nix Ed25519 secret key (`<name>:<base64>`) used to sign main-cache
+# narinfos (trusted refs and local manual pushes). Generate with `firn keygen`.
+# Required. Must differ from `pr_signing_key_file`.
+main_signing_key_file = "/run/secrets/firn-main.key"
+
+# Path to the Nix Ed25519 secret key used to sign PR overlay narinfos.
+# Required. Must differ from `main_signing_key_file`.
+pr_signing_key_file = "/run/secrets/firn-pr.key"
 
 # GitHub App credentials.
 # Optional as a whole. Required if you want:
@@ -43,10 +52,12 @@ pr_ttl_days = 3
 # Optional. Default: 15
 main_lru_days = 15
 
-# Cache owners. At least one [[owners]] entry is required.
-# Repeat [[owners]] to serve multiple GitHub users or organizations.
+# GitHub owners allowed to push to this cache (each stores blobs in its own GHCR).
+# At least one [[owners]] entry is required. Repeat [[owners]] to allow
+# additional GitHub users or organizations to publish into the same cache.
 [[owners]]
-# GitHub username or organization login, also used as the URL prefix `/<name>/`.
+# GitHub username or organization login (used for GHCR repository paths and
+# PR overlay routes `/pr/<name>/<repo>/<number>`).
 # Allowed characters: ASCII letters, digits, '-', '_'.
 # Required.
 name = "so1ve"
@@ -64,15 +75,6 @@ github_owner_id = 58381667
 # Numeric GitHub App installation ID for this owner.
 # Optional. Required for GHCR GC deletion and local `firn push --token`.
 github_installation_id = 98765432
-
-# Path to the Nix Ed25519 secret key (`<name>:<base64>`) used to sign main-cache
-# narinfos (trusted refs and local manual pushes). Generate with `firn keygen`.
-# Required. Must differ from `pr_signing_key_file`.
-main_signing_key_file = "/run/secrets/so1ve-main.key"
-
-# Path to the Nix Ed25519 secret key used to sign PR overlay narinfos.
-# Required. Must differ from `main_signing_key_file`.
-pr_signing_key_file = "/run/secrets/so1ve-pr.key"
 
 # GHCR package name template for GitHub Actions uploads.
 # `{repo}` is replaced with the repository name and lowercased.

@@ -11,7 +11,7 @@ presigned CDN URLs, so NAR payloads do not pass through the Firn server.
 
 ### Signing keys
 
-Generate two Ed25519 key pairs per owner: one for the main cache (default
+Generate two Ed25519 key pairs: one for the main cache (default
 `refs/heads/main`, configurable via `protected_refs`) and one for pull request
 overlays. GitHub branch protection rules are not required—Firn matches the OIDC
 `ref` claim against `protected_refs`.
@@ -28,12 +28,12 @@ Minimal configuration:
 ```toml
 database_path = "/var/lib/firn/state.db"
 public_base_url = "https://cache.example.com"
+main_signing_key_file = "/run/secrets/firn-main.key"
+pr_signing_key_file = "/run/secrets/firn-pr.key"
 
 [[owners]]
 name = "so1ve"
 github_owner_id = 58381667
-main_signing_key_file = "/run/secrets/so1ve-main.key"
-pr_signing_key_file = "/run/secrets/so1ve-pr.key"
 ```
 
 See [firn.example.toml](firn.example.toml) for the full configuration reference
@@ -67,12 +67,12 @@ Or deploy on NixOS with the flake module:
     enable = true;
     settings = {
       public_base_url = "https://cache.example.com";
+      main_signing_key_file = "/run/secrets/firn-main.key";
+      pr_signing_key_file = "/run/secrets/firn-pr.key";
       owners = [
         {
           name = "so1ve";
           github_owner_id = 58381667;
-          main_signing_key_file = "/run/secrets/so1ve-main.key";
-          pr_signing_key_file = "/run/secrets/so1ve-pr.key";
         }
       ];
     };
@@ -116,7 +116,6 @@ token on demand.
 ```sh
 firn push \
   --server https://cache.example.com \
-  --owner so1ve \
   --token "$FIRN_TOKEN" \
   ./result
 ```
@@ -126,14 +125,14 @@ firn push \
 Main cache (developer machines):
 
 ```text
-extra-substituters = https://cache.example.com/so1ve
+extra-substituters = https://cache.example.com
 extra-trusted-public-keys = cache.example.com-1:<MAIN_PUBLIC_KEY>
 ```
 
 PR overlay (CI only; falls back to the main cache on misses):
 
 ```text
-extra-substituters = https://cache.example.com/so1ve/pr/<repo>/<number>
+extra-substituters = https://cache.example.com/pr/<owner>/<repo>/<number>
 extra-trusted-public-keys = cache.example.com-1:<MAIN_PUBLIC_KEY> cache.example.com-pr-1:<PR_PUBLIC_KEY>
 ```
 

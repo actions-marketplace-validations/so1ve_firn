@@ -25,16 +25,13 @@ pub async fn run_once(firn: &Firn, dry_run: bool) -> Result<GcReport> {
     let now = unix_now();
     let pr_cutoff = days_before(now, firn.config.gc.pr_ttl_days);
     let main_cutoff = days_before(now, firn.config.gc.main_lru_days);
-    let mut report = GcReport::default();
+    let mut report = GcReport {
+        pr_paths_removed: firn.db.evict_expired_pr_scopes(pr_cutoff, dry_run)?,
+        main_paths_removed: firn.db.evict_stale_main_paths(main_cutoff, dry_run)?,
+        ..GcReport::default()
+    };
 
     for owner in firn.config.owners_by_name.values() {
-        report.pr_paths_removed +=
-            firn.db
-                .evict_expired_pr_scopes(&owner.name, pr_cutoff, dry_run)?;
-        report.main_paths_removed +=
-            firn.db
-                .evict_stale_main_paths(&owner.name, main_cutoff, dry_run)?;
-
         let unreferenced = firn.db.list_unreferenced_blobs(&owner.name)?;
         if unreferenced.is_empty() {
             continue;

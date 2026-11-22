@@ -321,6 +321,8 @@ impl TestHarness {
             listen: "127.0.0.1:0".to_owned(),
             database_path: tmp.path().join("state.db"),
             public_base_url: "https://cache.so1ve.dev".to_owned(),
+            main_signing_key_file: main_key_path,
+            pr_signing_key_file: pr_key_path,
             github_app: Some(GitHubAppConfig {
                 app_id: 1,
                 private_key_file: app_pem_path,
@@ -332,8 +334,6 @@ impl TestHarness {
                 owner_type: OwnerType::User,
                 github_owner_id: 58_381_667,
                 github_installation_id: Some(99),
-                main_signing_key_file: main_key_path,
-                pr_signing_key_file: pr_key_path,
                 package_template: "{repo}-cache".to_owned(),
                 manual_push_package: "manual-cache".to_owned(),
                 protected_refs: vec!["refs/heads/main".to_owned()],
@@ -543,14 +543,22 @@ async fn oidc_main_push_signs_and_redirects_to_cdn() {
         .upload_and_commit(&jwt, &plan.ghcr_repository, &path, nar_bytes)
         .await;
 
-    let narinfo_resp = h.get(&format!("/so1ve/{hash}.narinfo")).await;
+    let cache_info_resp = h.get("/nix-cache-info").await;
+    assert_eq!(cache_info_resp.status(), StatusCode::OK);
+    assert!(
+        response_text(cache_info_resp)
+            .await
+            .contains("Priority: 41")
+    );
+
+    let narinfo_resp = h.get(&format!("/{hash}.narinfo")).await;
     assert_eq!(narinfo_resp.status(), StatusCode::OK);
     let text = response_text(narinfo_resp).await;
     let sig = text.lines().find_map(|l| l.strip_prefix("Sig: ")).unwrap();
     let fp = fingerprint(&path, &nar_hash, nar_bytes.len() as u64, &[]);
     assert!(verify_signature(&h.main_key.public_string(), &fp, sig).unwrap());
 
-    let nar_resp = h.get(&format!("/so1ve/nar/{file_hex}.nar.zst")).await;
+    let nar_resp = h.get(&format!("/nar/{file_hex}.nar.zst")).await;
     assert_eq!(nar_resp.status(), StatusCode::FOUND);
     assert!(
         nar_resp
@@ -595,18 +603,18 @@ async fn pr_overlay_isolates_writes_and_keys_from_main() {
         .await;
 
     assert_eq!(
-        h.get(&format!("/so1ve/pr/latchshot/7/{main_hash}.narinfo"))
+        h.get(&format!("/pr/so1ve/latchshot/7/{main_hash}.narinfo"))
             .await
             .status(),
         StatusCode::OK
     );
     assert_eq!(
-        h.get(&format!("/so1ve/{pr_hash}.narinfo")).await.status(),
+        h.get(&format!("/{pr_hash}.narinfo")).await.status(),
         StatusCode::NOT_FOUND
     );
 
     let pr_text = response_text(
-        h.get(&format!("/so1ve/pr/latchshot/7/{pr_hash}.narinfo"))
+        h.get(&format!("/pr/so1ve/latchshot/7/{pr_hash}.narinfo"))
             .await,
     )
     .await;
@@ -623,13 +631,14 @@ async fn pr_overlay_isolates_writes_and_keys_from_main() {
 async fn gc_handles_last_version_fallback_and_download_threshold_protection() {
     let h = TestHarness::new().await;
 
-    // Manual Bearer token exchanges a scoped GHCR upload token via GitHub App.
+    // Manual Bearer token exchanges a scoped GHCR upload token via GitHub App
+    // without requiring an explicit owner when the token matches uniquely.
     let manual_resp = h
         .post_json(
             "/api/v1/uploads/plan",
             "manual-secret-token",
             &PlanRequest {
-                owner: Some("so1ve".to_owned()),
+                owner: None,
                 store_paths: Vec::new(),
             },
         )

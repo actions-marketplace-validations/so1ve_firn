@@ -177,19 +177,19 @@ fn build_state(firn: Firn, endpoints: &Endpoints) -> Result<(AppState, mpsc::Rec
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
+        .route("/nix-cache-info", get(cache::main_cache_info))
+        .route("/nar/{file}", get(cache::main_nar))
+        .route("/{narinfo}", get(cache::main_narinfo))
         .route("/api/v1/uploads/plan", post(upload::plan))
         .route("/api/v1/uploads/commit", post(upload::commit))
         .route("/api/v1/webhooks/github", post(webhook::handle))
-        .route("/{owner}/nix-cache-info", get(cache::main_cache_info))
-        .route("/{owner}/nar/{file}", get(cache::main_nar))
-        .route("/{owner}/{narinfo}", get(cache::main_narinfo))
         .route(
-            "/{owner}/pr/{repo}/{number}/nix-cache-info",
+            "/pr/{owner}/{repo}/{number}/nix-cache-info",
             get(cache::pr_cache_info),
         )
-        .route("/{owner}/pr/{repo}/{number}/nar/{file}", get(cache::pr_nar))
+        .route("/pr/{owner}/{repo}/{number}/nar/{file}", get(cache::pr_nar))
         .route(
-            "/{owner}/pr/{repo}/{number}/{narinfo}",
+            "/pr/{owner}/{repo}/{number}/{narinfo}",
             get(cache::pr_narinfo),
         )
         .layer(middleware::from_fn(log_request))

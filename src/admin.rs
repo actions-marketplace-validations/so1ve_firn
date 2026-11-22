@@ -53,11 +53,19 @@ fn format_remaining_ttl(now: i64, updated_at: i64, ttl_days: u64) -> String {
 
 impl Firn {
     pub fn show_status(&self) -> Result<()> {
-        println!("Public URL: {}", self.config.public_base_url);
-        println!("Database:   {}", self.config.database_path.display());
+        let cache = self.db.cache_stats()?;
+
+        println!("Public URL:  {}", self.config.public_base_url);
+        println!("Database:    {}", self.config.database_path.display());
         println!(
-            "GC policy:  pr_ttl={}d, main_lru={}d",
+            "GC policy:   pr_ttl={}d, main_lru={}d",
             self.config.gc.pr_ttl_days, self.config.gc.main_lru_days
+        );
+        println!("Main key:    {}", self.config.main_key.public_string());
+        println!("PR key:      {}", self.config.pr_key.public_string());
+        println!(
+            "Store paths: {} main, {} pr ({} active PRs)",
+            cache.main_paths, cache.pr_paths, cache.active_prs
         );
 
         let mut owner_names: Vec<&str> = self
@@ -69,16 +77,10 @@ impl Firn {
         owner_names.sort_unstable();
 
         for name in owner_names {
-            let owner = self.config.owner_by_name(name).unwrap();
             let stats = self.db.owner_stats(name)?;
 
             println!("\n[{name}]");
-            println!("  main key:     {}", owner.main_key.public_string());
-            println!("  pr key:       {}", owner.pr_key.public_string());
-            println!(
-                "  store paths:  {} main, {} pr ({} active PRs)",
-                stats.main_paths, stats.pr_paths, stats.active_prs
-            );
+            println!("  active PRs:   {}", stats.active_prs);
             println!(
                 "  blobs:        {} total ({}), {} unreferenced, {} gc-blocked",
                 stats.total_blobs,

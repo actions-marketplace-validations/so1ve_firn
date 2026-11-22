@@ -65,8 +65,6 @@ pub struct OwnerConfig {
     pub github_owner_id: u64,
     #[serde(default)]
     pub github_installation_id: Option<u64>,
-    pub main_signing_key_file: PathBuf,
-    pub pr_signing_key_file: PathBuf,
     #[serde(default = "default_package_template")]
     pub package_template: String,
     #[serde(default = "default_manual_push_package")]
@@ -85,6 +83,8 @@ pub struct Config {
     pub listen: String,
     pub database_path: PathBuf,
     pub public_base_url: String,
+    pub main_signing_key_file: PathBuf,
+    pub pr_signing_key_file: PathBuf,
     #[serde(default)]
     pub github_app: Option<GitHubAppConfig>,
     #[serde(default)]
@@ -103,8 +103,6 @@ pub struct LoadedOwner {
     pub name: String,
     pub owner_type: OwnerType,
     pub github_installation_id: Option<u64>,
-    pub main_key: SigningKeyPair,
-    pub pr_key: SigningKeyPair,
     pub package_template: String,
     pub manual_push_package: String,
     pub protected_refs: Vec<String>,
@@ -165,16 +163,11 @@ fn load_tokens_file(path: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-fn read_signing_key(path: &Path, owner: &str, kind: &str) -> Result<SigningKeyPair> {
-    let raw = fs::read_to_string(path).with_context(|| {
-        format!(
-            "failed to read {kind} signing key for owner '{owner}' at {}",
-            path.display()
-        )
-    })?;
+fn read_signing_key(path: &Path, kind: &str) -> Result<SigningKeyPair> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read {kind} signing key at {}", path.display()))?;
 
-    SigningKeyPair::parse_secret(&raw)
-        .with_context(|| format!("invalid {kind} signing key for owner '{owner}'"))
+    SigningKeyPair::parse_secret(&raw).with_context(|| format!("invalid {kind} signing key"))
 }
 
 fn load_github_app(app: GitHubAppConfig) -> Result<LoadedGitHubApp> {
@@ -207,14 +200,6 @@ fn load_github_app(app: GitHubAppConfig) -> Result<LoadedGitHubApp> {
 
 fn load_owner(owner: OwnerConfig) -> Result<LoadedOwner> {
     validate_owner_name(&owner.name)?;
-    let main_key = read_signing_key(&owner.main_signing_key_file, &owner.name, "main")?;
-    let pr_key = read_signing_key(&owner.pr_signing_key_file, &owner.name, "PR")?;
-    if main_key.public_string() == pr_key.public_string() {
-        bail!(
-            "owner '{}' must use distinct signing keys for main and PR overlays",
-            owner.name
-        );
-    }
 
     let manual_tokens = match owner.manual_tokens_file {
         Some(path) => load_tokens_file(&path)?,
@@ -225,8 +210,6 @@ fn load_owner(owner: OwnerConfig) -> Result<LoadedOwner> {
         name: owner.name,
         owner_type: owner.owner_type,
         github_installation_id: owner.github_installation_id,
-        main_key,
-        pr_key,
         package_template: owner.package_template,
         manual_push_package: owner.manual_push_package.to_ascii_lowercase(),
         protected_refs: owner.protected_refs,
@@ -239,6 +222,8 @@ pub struct LoadedConfig {
     pub listen: String,
     pub database_path: PathBuf,
     pub public_base_url: String,
+    pub main_key: SigningKeyPair,
+    pub pr_key: SigningKeyPair,
     pub github_app: Option<LoadedGitHubApp>,
     pub gc: GcConfig,
     pub owners_by_name: HashMap<String, LoadedOwner>,
@@ -254,6 +239,12 @@ impl LoadedConfig {
         let public_base_url = raw.public_base_url.trim_end_matches('/').to_owned();
         if public_base_url.is_empty() {
             bail!("public_base_url must not be empty");
+        }
+
+        let main_key = read_signing_key(&raw.main_signing_key_file, "main")?;
+        let pr_key = read_signing_key(&raw.pr_signing_key_file, "PR")?;
+        if main_key.public_string() == pr_key.public_string() {
+            bail!("main_signing_key_file and pr_signing_key_file must use distinct signing keys");
         }
 
         let github_app = match raw.github_app {
@@ -282,6 +273,8 @@ impl LoadedConfig {
             listen: raw.listen,
             database_path: raw.database_path,
             public_base_url,
+            main_key,
+            pr_key,
             github_app,
             gc: raw.gc,
             owners_by_name,

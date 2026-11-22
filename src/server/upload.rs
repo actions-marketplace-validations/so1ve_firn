@@ -17,21 +17,29 @@ use crate::protocol::{CommitEntry, CommitRequest, CommitResponse, PlanRequest, P
 
 enum UploadScope {
     Main,
-    Pr { repo: String, number: u64 },
+    Pr {
+        owner: String,
+        repo: String,
+        number: u64,
+    },
 }
 
 impl UploadScope {
     fn as_db_scope(&self) -> String {
         match self {
             Self::Main => MAIN_SCOPE.to_owned(),
-            Self::Pr { repo, number } => pr_scope(repo, *number),
+            Self::Pr {
+                owner,
+                repo,
+                number,
+            } => pr_scope(owner, repo, *number),
         }
     }
 
     const fn pr_info(&self) -> Option<(&str, u64)> {
         match self {
             Self::Main => None,
-            Self::Pr { repo, number } => Some((repo.as_str(), *number)),
+            Self::Pr { repo, number, .. } => Some((repo.as_str(), *number)),
         }
     }
 }
@@ -73,6 +81,35 @@ fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
     Ok(token)
 }
 
+fn match_manual_owner<'a>(
+    state: &'a AppState,
+    requested_owner: Option<&str>,
+    token: &str,
+) -> Result<Option<&'a LoadedOwner>, ApiError> {
+    if let Some(owner_name) = requested_owner {
+        return Ok(state
+            .firn
+            .config
+            .owner_by_name(owner_name)
+            .filter(|owner| constant_time_token_matches(&owner.manual_tokens, token)));
+    }
+
+    let mut matched: Option<&LoadedOwner> = None;
+    for owner in state.firn.config.owners_by_name.values() {
+        if constant_time_token_matches(&owner.manual_tokens, token) {
+            if matched.is_some() {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "manual token matches multiple owners; specify --owner",
+                ));
+            }
+            matched = Some(owner);
+        }
+    }
+
+    Ok(matched)
+}
+
 async fn authenticate<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
@@ -80,10 +117,7 @@ async fn authenticate<'a>(
 ) -> Result<AuthenticatedUpload<'a>, ApiError> {
     let token = extract_bearer_token(headers)?;
 
-    if let Some(owner_name) = requested_owner
-        && let Some(owner) = state.firn.config.owner_by_name(owner_name)
-        && constant_time_token_matches(&owner.manual_tokens, token)
-    {
+    if let Some(owner) = match_manual_owner(state, requested_owner, token)? {
         return Ok(AuthenticatedUpload {
             owner,
             ghcr_package: owner.manual_push_package.clone(),
@@ -148,6 +182,7 @@ async fn authenticate<'a>(
             };
 
             UploadScope::Pr {
+                owner: owner.name.clone(),
                 repo: repo_name.to_owned(),
                 number,
             }
@@ -302,7 +337,7 @@ pub(super) async fn plan(
     let existing = state
         .firn
         .db
-        .existing_store_hashes(&auth.owner.name, &scope, &hashes)
+        .existing_store_hashes(&scope, &hashes)
         .map_err(ApiError::internal)?;
     let total = hashes.len();
     let missing: Vec<String> = hashes
@@ -346,8 +381,8 @@ pub(super) async fn commit(
     let ghcr_repository = auth.owner.ghcr_repository(&auth.ghcr_package);
     let scope_str = auth.scope.as_db_scope();
     let signing_key = match auth.scope {
-        UploadScope::Main => &auth.owner.main_key,
-        UploadScope::Pr { .. } => &auth.owner.pr_key,
+        UploadScope::Main => &state.firn.config.main_key,
+        UploadScope::Pr { .. } => &state.firn.config.pr_key,
     };
 
     let mut prepared = Vec::with_capacity(request.entries.len());
