@@ -55,7 +55,7 @@ export function DashboardPage({ data }: { data: DashboardData }) {
   ].join("\n");
 
   const actionsSnippet = [
-    "- uses: so1ve/firn@main",
+    "- uses: so1ve/firn@v1",
     "  with:",
     `    server: ${data.publicBaseUrl}`,
   ].join("\n");

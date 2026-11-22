@@ -125,7 +125,7 @@ permissions:
 steps:
   - uses: actions/checkout@v7
   - uses: cachix/install-nix-action@v32
-  - uses: so1ve/firn@main
+  - uses: so1ve/firn@v1
     with:
       server: https://cache.example.com
   - run: nix flake check

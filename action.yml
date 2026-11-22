@@ -2,6 +2,10 @@ name: Firn Nix Binary Cache
 description: Configure a Firn Nix binary cache and automatically push newly built store paths
 author: Ray (so1ve)
 
+branding:
+  icon: layers
+  color: blue
+
 inputs:
   server:
     description: Base URL of the Firn server (e.g. https://cache.so1ve.dev)
