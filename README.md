@@ -8,6 +8,11 @@ D1) with a built-in web dashboard and Node.js CLI.
 Metadata, signing, and GC state live in Cloudflare D1, while compressed NAR
 blobs transfer directly between clients and GHCR via 302 CDN redirects.
 
+## Live Example
+
+- **Cache & Dashboard**: [cache.so1ve.dev](https://cache.so1ve.dev)
+- **CI Integration**: [so1ve/nur-packages](https://github.com/so1ve/nur-packages)
+
 ## Install CLI
 
 ```sh
