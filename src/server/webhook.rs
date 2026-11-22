@@ -30,7 +30,7 @@ struct PullRequestWebhook {
     pull_request: WebhookPullRequest,
 }
 
-pub(super) async fn handle(
+pub async fn handle(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,

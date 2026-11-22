@@ -319,7 +319,7 @@ async fn validate_and_sign(
     })
 }
 
-pub(super) async fn plan(
+pub async fn plan(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<PlanRequest>,
@@ -372,7 +372,7 @@ pub(super) async fn plan(
     }))
 }
 
-pub(super) async fn commit(
+pub async fn commit(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<CommitRequest>,

@@ -1,13 +1,28 @@
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, LOCATION};
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
 use tracing::debug;
 
 use super::{ApiError, AppState};
 use crate::config::CACHE_PRIORITY;
 use crate::db::{MAIN_SCOPE, pr_scope};
 use crate::nix_format::{render_nix_cache_info, validate_sha256_hex, validate_store_hash};
+
+#[derive(Serialize)]
+pub struct PublicKeysResponse {
+    main_public_key: String,
+    pr_public_key: String,
+}
+
+pub async fn public_keys(State(state): State<AppState>) -> Json<PublicKeysResponse> {
+    Json(PublicKeysResponse {
+        main_public_key: state.firn.config.main_key.public_string(),
+        pr_public_key: state.firn.config.pr_key.public_string(),
+    })
+}
 
 fn serve_cache_info() -> Response {
     let body = render_nix_cache_info(CACHE_PRIORITY);
@@ -88,11 +103,11 @@ async fn serve_nar(state: &AppState, scope: &str, file_name: &str) -> Result<Res
     Ok((StatusCode::FOUND, [(LOCATION, redirect_url)]).into_response())
 }
 
-pub(super) async fn main_cache_info() -> Response {
+pub async fn main_cache_info() -> Response {
     serve_cache_info()
 }
 
-pub(super) async fn pr_cache_info(
+pub async fn pr_cache_info(
     State(state): State<AppState>,
     Path((owner, _repo, _number)): Path<(String, String, u64)>,
 ) -> Result<Response, ApiError> {
@@ -101,14 +116,14 @@ pub(super) async fn pr_cache_info(
     Ok(serve_cache_info())
 }
 
-pub(super) async fn main_narinfo(
+pub async fn main_narinfo(
     State(state): State<AppState>,
     Path(narinfo_file): Path<String>,
 ) -> Result<Response, ApiError> {
     serve_narinfo(&state, MAIN_SCOPE, &narinfo_file)
 }
 
-pub(super) async fn pr_narinfo(
+pub async fn pr_narinfo(
     State(state): State<AppState>,
     Path((owner, repo, number, narinfo_file)): Path<(String, String, u64, String)>,
 ) -> Result<Response, ApiError> {
@@ -117,14 +132,14 @@ pub(super) async fn pr_narinfo(
     serve_narinfo(&state, &pr_scope(&owner, &repo, number), &narinfo_file)
 }
 
-pub(super) async fn main_nar(
+pub async fn main_nar(
     State(state): State<AppState>,
     Path(file): Path<String>,
 ) -> Result<Response, ApiError> {
     serve_nar(&state, MAIN_SCOPE, &file).await
 }
 
-pub(super) async fn pr_nar(
+pub async fn pr_nar(
     State(state): State<AppState>,
     Path((owner, repo, number, file)): Path<(String, String, u64, String)>,
 ) -> Result<Response, ApiError> {

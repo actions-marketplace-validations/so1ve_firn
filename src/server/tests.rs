@@ -543,6 +543,19 @@ async fn oidc_main_push_signs_and_redirects_to_cdn() {
         .upload_and_commit(&jwt, &plan.ghcr_repository, &path, nar_bytes)
         .await;
 
+    let keys_resp = h.get("/api/v1/public-keys").await;
+    assert_eq!(keys_resp.status(), StatusCode::OK);
+    let keys_json: serde_json::Value =
+        serde_json::from_str(&response_text(keys_resp).await).unwrap();
+    assert_eq!(
+        keys_json["main_public_key"].as_str(),
+        Some(h.main_key.public_string().as_str())
+    );
+    assert_eq!(
+        keys_json["pr_public_key"].as_str(),
+        Some(h.pr_key.public_string().as_str())
+    );
+
     let cache_info_resp = h.get("/nix-cache-info").await;
     assert_eq!(cache_info_resp.status(), StatusCode::OK);
     assert!(

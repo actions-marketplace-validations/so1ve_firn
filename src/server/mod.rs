@@ -47,7 +47,7 @@ impl Endpoints {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     firn: Firn,
     registry_url: String,
     oci: Arc<OciClient>,
@@ -55,7 +55,7 @@ struct AppState {
     access_tx: mpsc::Sender<i64>,
 }
 
-struct ApiError(StatusCode, String);
+pub struct ApiError(StatusCode, String);
 
 impl ApiError {
     fn new(status: StatusCode, message: impl Into<String>) -> Self {
@@ -180,6 +180,7 @@ fn build_router(state: AppState) -> Router {
         .route("/nix-cache-info", get(cache::main_cache_info))
         .route("/nar/{file}", get(cache::main_nar))
         .route("/{narinfo}", get(cache::main_narinfo))
+        .route("/api/v1/public-keys", get(cache::public_keys))
         .route("/api/v1/uploads/plan", post(upload::plan))
         .route("/api/v1/uploads/commit", post(upload::commit))
         .route("/api/v1/webhooks/github", post(webhook::handle))
