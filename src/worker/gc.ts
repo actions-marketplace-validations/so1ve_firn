@@ -8,7 +8,7 @@ import {
   listUnreferencedBlobs,
   markBlobGcBlocked,
 } from "./db.ts";
-import { GitHubAppClient } from "./github.ts";
+import { createGitHubAppClient } from "./github.ts";
 
 const SECONDS_PER_DAY = 24 * 60 * 60;
 
@@ -30,16 +30,7 @@ export async function runGc(
     blob_errors: 0,
   };
 
-  const githubApp =
-    config.githubApp &&
-    config.githubApp.appId > 0 &&
-    config.githubApp.privateKeyPem
-      ? new GitHubAppClient(
-          config.githubApp.appId,
-          config.githubApp.privateKeyPem,
-          config.githubApiUrl,
-        )
-      : null;
+  const githubApp = createGitHubAppClient(config);
 
   for (const owner of config.ownersByName.values()) {
     const unreferenced = await listUnreferencedBlobs(db, owner.name);

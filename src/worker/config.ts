@@ -28,7 +28,6 @@ export interface LoadedOwner {
 export interface LoadedGitHubApp {
   appId: number;
   privateKeyPem: string;
-  webhookSecret: string | null;
 }
 
 export interface LoadedConfig {
@@ -39,6 +38,7 @@ export interface LoadedConfig {
   mainKey: SigningKeyPair;
   prKey: SigningKeyPair;
   githubApp: LoadedGitHubApp | null;
+  webhookSecret: string | null;
   gc: {
     prTtlDays: number;
     mainLruDays: number;
@@ -176,22 +176,13 @@ export async function loadConfig(env: WorkerRuntimeEnv): Promise<LoadedConfig> {
 
   const appIdRaw = env.GITHUB_APP_ID?.trim();
   const privateKeyPem = env.GITHUB_APP_PRIVATE_KEY?.trim();
-  const webhookSecret = env.GITHUB_WEBHOOK_SECRET?.trim() || null;
-
-  let githubApp: LoadedGitHubApp | null = null;
-  if (appIdRaw && privateKeyPem) {
-    githubApp = {
-      appId: parsePositiveInt(appIdRaw, 0),
-      privateKeyPem,
-      webhookSecret,
-    };
-  } else if (webhookSecret) {
-    githubApp = {
-      appId: 0,
-      privateKeyPem: "",
-      webhookSecret,
-    };
-  }
+  const githubApp: LoadedGitHubApp | null =
+    appIdRaw && privateKeyPem
+      ? {
+          appId: parsePositiveInt(appIdRaw, 0),
+          privateKeyPem,
+        }
+      : null;
 
   return {
     publicBaseUrl,
@@ -209,6 +200,7 @@ export async function loadConfig(env: WorkerRuntimeEnv): Promise<LoadedConfig> {
     mainKey,
     prKey,
     githubApp,
+    webhookSecret: env.GITHUB_WEBHOOK_SECRET?.trim() || null,
     gc: {
       prTtlDays: parsePositiveInt(env.GC_PR_TTL_DAYS, 3),
       mainLruDays: parsePositiveInt(env.GC_MAIN_LRU_DAYS, 15),

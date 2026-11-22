@@ -1,5 +1,5 @@
 import { encodeHex, unixNow } from "../shared/nix-format.ts";
-import type { OwnerType } from "./config.ts";
+import type { LoadedConfig, OwnerType } from "./config.ts";
 
 export interface OidcClaims {
   iss: string;
@@ -472,3 +472,14 @@ export class GitHubAppClient {
     );
   }
 }
+
+export const createGitHubAppClient = (
+  config: LoadedConfig,
+): GitHubAppClient | null =>
+  config.githubApp
+    ? new GitHubAppClient(
+        config.githubApp.appId,
+        config.githubApp.privateKeyPem,
+        config.githubApiUrl,
+      )
+    : null;

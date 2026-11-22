@@ -20,6 +20,7 @@ import {
   storedToNarInfo,
   touchAccessedThrottled,
 } from "../db.ts";
+import { acquirePullToken } from "../ghcr.ts";
 
 export interface AppBindings {
   Bindings: Env;
@@ -98,7 +99,13 @@ async function serveNar(
   const config = c.get("config");
   const oci = new OciClient(config.registryUrl);
   const repo = ghcrRepository(blob.ownerId, blob.ghcrPackage);
-  const redirectUrl = await oci.resolveBlobRedirect(repo, blob.blobDigest);
+  const owner = config.ownersByName.get(blob.ownerId);
+  const pullToken = await acquirePullToken(config, owner, oci, repo);
+  const redirectUrl = await oci.resolveBlobRedirect(
+    repo,
+    blob.blobDigest,
+    pullToken,
+  );
 
   return c.redirect(redirectUrl, 302);
 }

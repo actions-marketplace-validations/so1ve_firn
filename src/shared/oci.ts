@@ -94,6 +94,15 @@ const sleep = async (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
+export class OciHttpError extends Error {
+  public readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export class OciClient {
   readonly #registryUrl: string;
   readonly #service: string;
@@ -136,7 +145,8 @@ export class OciClient {
     if (!response.ok) {
       const body = await response.text().catch(() => "");
 
-      throw new Error(
+      throw new OciHttpError(
+        response.status,
         `OCI token exchange at ${url} failed (${response.status}): ${body}`,
       );
     }
@@ -155,13 +165,12 @@ export class OciClient {
     manifestDigest: string,
     blobDigestHex: string,
     expectedSize: number,
-    pullToken?: string,
+    pullToken: string,
   ): Promise<void> {
-    const token = pullToken ?? (await this.exchangeToken(repository, "pull"));
     const manifestUrl = `${this.#registryUrl}/v2/${repository}/manifests/${manifestDigest}`;
     const response = await this.#fetchWithRetry(manifestUrl, {
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${pullToken}`,
         Accept: OCI_MANIFEST_MEDIA_TYPE,
       },
     });
@@ -189,7 +198,7 @@ export class OciClient {
     const blobUrl = `${this.#registryUrl}/v2/${repository}/blobs/${expectedLayerDigest}`;
     const head = await this.#fetchWithRetry(blobUrl, {
       method: "HEAD",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${pullToken}` },
       redirect: "manual",
     });
     if (!head.ok && (head.status < 300 || head.status >= 400)) {
@@ -202,12 +211,12 @@ export class OciClient {
   public async resolveBlobRedirect(
     repository: string,
     blobDigestHex: string,
+    pullToken: string,
   ): Promise<string> {
-    const token = await this.exchangeToken(repository, "pull");
     const digest = `sha256:${blobDigestHex.toLowerCase()}`;
     const blobUrl = `${this.#registryUrl}/v2/${repository}/blobs/${digest}`;
     const response = await this.#fetchWithRetry(blobUrl, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${pullToken}` },
       redirect: "manual",
     });
 

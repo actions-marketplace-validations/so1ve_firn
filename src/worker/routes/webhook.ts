@@ -19,7 +19,7 @@ export async function handleWebhook(
   c: Context<AppBindings>,
 ): Promise<Response> {
   const config = c.get("config");
-  const secret = config.githubApp?.webhookSecret;
+  const secret = config.webhookSecret;
   if (!secret) {
     return c.text("webhooks not enabled", 404);
   }

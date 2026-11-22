@@ -992,4 +992,79 @@ describe("firn worker", () => {
     expect(manifestAttempts).toBe(3);
     expect(emptyConfigHeads).toBe(1);
   });
+
+  it("falls back to GitHub App pull token only on 401/403 for private GHCR packages", async () => {
+    const baseFetch = createMockFetch(rsa.jwk, store);
+    let tokenStatus = 401;
+    let installTokenCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const reqUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const url = new URL(reqUrl);
+        if (url.pathname === "/token") {
+          const headers = new Headers(
+            init?.headers ?? (input instanceof Request ? input.headers : {}),
+          );
+          if (!headers.get("authorization")) {
+            return Response.json(
+              {
+                errors: [
+                  { code: "UNAUTHORIZED", message: "authentication required" },
+                ],
+              },
+              { status: tokenStatus },
+            );
+          }
+        }
+        if (/^\/app\/installations\/\d+\/access_tokens$/.test(url.pathname)) {
+          installTokenCalls += 1;
+        }
+
+        return baseFetch(input, init);
+      },
+    );
+
+    const jwt = await signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/private-repo",
+      ref: "refs/heads/main",
+      event_name: "push",
+    });
+    const hash = "ffffffffffffffffffffffffffffffff";
+    const { blobHex } = await uploadAndCommit(
+      jwt,
+      "so1ve/private-repo-cache",
+      `/nix/store/${hash}-priv`,
+      "private-nar-payload",
+    );
+
+    const narRes = await callWorker(
+      new Request(`https://cache.so1ve.dev/nar/${blobHex}.nar.zst`),
+    );
+
+    expect(narRes.status).toBe(302);
+    expect(narRes.headers.get("location")).toContain(
+      "/cdn/so1ve/private-repo-cache/sha256:",
+    );
+    expect(installTokenCalls).toBe(2);
+
+    // Non-auth errors (e.g. 404) must bubble up without minting an installation token.
+    tokenStatus = 404;
+    const failedRes = await callWorker(
+      new Request(`https://cache.so1ve.dev/nar/${blobHex}.nar.zst`),
+    );
+
+    expect(failedRes.status).toBe(500);
+    expect(installTokenCalls).toBe(2);
+  });
 });

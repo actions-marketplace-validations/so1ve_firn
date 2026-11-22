@@ -32,7 +32,11 @@ import {
   prScope,
 } from "../db.ts";
 import {
-  GitHubAppClient,
+  GhcrAuthUnavailableError,
+  acquirePullToken,
+  exchangeInstallationGhcrToken,
+} from "../ghcr.ts";
+import {
   constantTimeTokenMatches,
   oidcOwnerId,
   oidcPullRequestNumber,
@@ -210,39 +214,6 @@ async function authenticate(
   };
 }
 
-async function issueScopedGhcrToken(
-  config: LoadedConfig,
-  owner: LoadedOwner,
-  oci: OciClient,
-  repository: string,
-): Promise<string> {
-  if (
-    !config.githubApp ||
-    config.githubApp.appId <= 0 ||
-    !config.githubApp.privateKeyPem
-  ) {
-    throw new HttpError(
-      503,
-      "GitHub App is not configured for manual push token exchange",
-    );
-  }
-  if (owner.githubInstallationId === null) {
-    throw new HttpError(503, "owner has no github_installation_id configured");
-  }
-
-  const app = new GitHubAppClient(
-    config.githubApp.appId,
-    config.githubApp.privateKeyPem,
-    config.githubApiUrl,
-  );
-  const installToken = await app.installationToken(owner.githubInstallationId);
-
-  return oci.exchangeToken(repository, "pull,push", [
-    "x-access-token",
-    installToken,
-  ]);
-}
-
 async function validateAndSign(
   oci: OciClient,
   repository: string,
@@ -361,9 +332,24 @@ export async function handleUploadPlan(
     const repo = ghcrRepository(auth.owner.name, auth.ghcrPackage);
 
     const oci = new OciClient(config.registryUrl);
-    const ghcrToken = auth.needsGhcrToken
-      ? await issueScopedGhcrToken(config, auth.owner, oci, repo)
-      : undefined;
+    let ghcrToken: string | undefined;
+    if (auth.needsGhcrToken) {
+      try {
+        ghcrToken = await exchangeInstallationGhcrToken(
+          config,
+          auth.owner,
+          oci,
+          repo,
+          "pull,push",
+        );
+      } catch (error) {
+        if (error instanceof GhcrAuthUnavailableError) {
+          throw new HttpError(503, error.message);
+        }
+
+        throw error;
+      }
+    }
 
     console.log(
       JSON.stringify({
@@ -408,7 +394,9 @@ export async function handleUploadCommit(
     const now = unixNow();
     const entries = body.entries ?? [];
     const pullToken =
-      entries.length > 0 ? await oci.exchangeToken(repo, "pull") : "";
+      entries.length > 0
+        ? await acquirePullToken(config, auth.owner, oci, repo)
+        : "";
 
     const records = await Promise.all(
       entries.map((entry) =>
