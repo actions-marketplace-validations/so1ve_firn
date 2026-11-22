@@ -874,7 +874,7 @@ describe("firn worker", () => {
       mainJwt,
       "so1ve/latchshot-cache",
       "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hello-world",
-      "hello-nar",
+      "hello-nar-larger-payload",
     );
     await uploadAndCommit(
       prJwt,
@@ -910,6 +910,38 @@ describe("firn worker", () => {
 
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.store_path).toContain("pr-preview");
+
+    const bySizeRes = await callWorker(
+      new Request("https://cache.so1ve.dev/api/v1/public/paths?sort=size"),
+    );
+
+    expect(bySizeRes.status).toBe(200);
+
+    const bySize = await bySizeRes.json<StorePathSummary[]>();
+
+    expect(bySize.map((item) => item.store_path)).toEqual([
+      "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hello-world",
+      "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-pr-preview",
+    ]);
+
+    const byAccessedRes = await callWorker(
+      new Request("https://cache.so1ve.dev/api/v1/public/paths?sort=accessed"),
+    );
+
+    expect(byAccessedRes.status).toBe(200);
+
+    const byAccessed = await byAccessedRes.json<StorePathSummary[]>();
+
+    expect(byAccessed.map((item) => item.store_path)).toEqual([
+      "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-pr-preview",
+      "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hello-world",
+    ]);
+
+    const badSortRes = await callWorker(
+      new Request("https://cache.so1ve.dev/api/v1/public/paths?sort=bogus"),
+    );
+
+    expect(badSortRes.status).toBe(400);
 
     const unknownOwnerRes = await callWorker(
       new Request("https://cache.so1ve.dev/api/v1/public/paths?owner=nobody"),

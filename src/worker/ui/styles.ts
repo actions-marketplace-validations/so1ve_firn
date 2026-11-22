@@ -107,7 +107,7 @@ select:focus {
 .head-top {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 0.75rem 1.25rem;
 }
@@ -271,7 +271,7 @@ section {
 .sec-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 0.625rem 1rem;
   padding-bottom: 0.5rem;
@@ -361,9 +361,27 @@ table {
   font-size: 13px;
 }
 
+.paths-table,
+.prs-table,
+.owners-table {
+  table-layout: fixed;
+}
+
+.paths-table { min-width: 40rem; }
+.prs-table { min-width: 34rem; }
+
+.col-path, .col-repo, .col-share { width: auto; }
+.col-scope { width: 11.5rem; }
+.col-owner { width: 6.5rem; }
+.col-owner-name { width: 10.5rem; }
+.col-size { width: 6.5rem; }
+.col-time { width: 6.25rem; }
+.col-count { width: 4.75rem; }
+.col-actions { width: 8rem; }
+
 th {
   text-align: left;
-  padding: 0.25rem 0.5rem 0.5rem 0;
+  padding: 0.25rem 0.75rem 0.5rem 0;
   font-size: 11.5px;
   font-weight: 500;
   color: var(--faint);
@@ -372,6 +390,33 @@ th {
 }
 
 th:last-child { padding-right: 0; }
+
+.sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+
+.sort-btn:hover { color: var(--text); }
+.sort-btn.active { color: var(--text); font-weight: 600; }
+
+.sort-arrow {
+  display: inline-block;
+  width: 0.75em;
+  text-align: center;
+  color: var(--accent);
+  visibility: hidden;
+}
+
+.sort-btn.active .sort-arrow { visibility: visible; }
+.sort-btn:hover:not(.active) .sort-arrow { visibility: visible; opacity: 0.45; }
 
 td {
   padding: 0.5rem 0.75rem 0.5rem 0;
@@ -385,10 +430,10 @@ tbody tr:last-child td { border-bottom: 0; }
 
 .path-cell {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.5rem;
-  min-width: 240px;
-  max-width: 460px;
+  width: 100%;
+  min-width: 0;
 }
 
 .path-text {
@@ -408,6 +453,7 @@ tbody tr:last-child td { border-bottom: 0; }
   min-width: 38px;
   text-align: right;
   text-decoration: none;
+  flex: none;
 }
 
 tr:hover .row-action,
@@ -420,6 +466,14 @@ tr:hover .row-action,
   display: inline-flex;
   align-items: center;
   gap: 0.375rem;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.scope-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dot {
@@ -434,31 +488,12 @@ tr:hover .row-action,
 .dot.pr { background: var(--accent); }
 .dot.warn { background: var(--warn); }
 
-/* Owner storage rows */
-.owner-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.owner-row {
-  padding-block: 0.55rem;
-  border-bottom: 1px dashed var(--border);
-}
-
-.owner-row:last-child { border-bottom: 0; }
-
-.owner-grid {
-  display: grid;
-  grid-template-columns: minmax(7rem, 10rem) minmax(5rem, 1fr) minmax(14rem, 19rem);
-  align-items: center;
-  gap: 0.5rem 1.25rem;
-}
-
+/* Owner storage table */
 .owner-name {
-  display: flex;
+  display: inline-flex;
   align-items: baseline;
   gap: 0.45rem;
+  max-width: 100%;
   min-width: 0;
 }
 
@@ -469,6 +504,10 @@ tr:hover .row-action,
   white-space: nowrap;
 }
 
+.owners-table .share-col {
+  padding-right: 1.25rem;
+}
+
 .share-bar {
   height: 5px;
   border-radius: 999px;
@@ -477,23 +516,21 @@ tr:hover .row-action,
     var(--bar-track);
 }
 
-.owner-meta {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.25rem 0.65rem;
-  font-size: 12.5px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.owner-meta strong {
-  color: var(--text);
+.owners-table td strong {
   font-weight: 550;
 }
 
+.owner-has-blocked td {
+  border-bottom: 0;
+  padding-bottom: 0.2rem;
+}
+
+.blocked-row td {
+  padding-top: 0;
+}
+
 .blocked-list {
-  margin: 0.4rem 0 0;
+  margin: 0;
   padding: 0 0 0 1rem;
   list-style: none;
   font-size: 12px;
@@ -524,8 +561,8 @@ tr:hover .row-action,
 
 @media (max-width: 680px) {
   .wrap { width: min(100% - 1.5rem, 58rem); }
-  .owner-grid { grid-template-columns: minmax(0, 1fr) auto; }
-  .share-bar { display: none; }
+  .owners-table .share-col,
+  .owners-table .col-share { display: none; }
   input[type="search"] { width: 100%; }
 }
 `;

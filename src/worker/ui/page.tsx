@@ -309,14 +309,39 @@ export function DashboardPage({ data }: { data: DashboardData }) {
             <div id="paths-error" class="notice error" role="alert" hidden />
 
             <div class="table-scroll">
-              <table>
+              <table class="paths-table">
+                <colgroup>
+                  <col class="col-path" />
+                  <col class="col-scope" />
+                  <col class="col-owner" />
+                  <col class="col-size" />
+                  <col class="col-time" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Path</th>
                     <th>Scope</th>
                     <th>Owner</th>
-                    <th class="num">Size</th>
-                    <th class="num">Accessed</th>
+                    <th class="num" aria-sort="none">
+                      <button type="button" class="sort-btn" data-sort="size">
+                        <span class="sort-arrow" aria-hidden="true">
+                          ↓
+                        </span>
+                        Size
+                      </button>
+                    </th>
+                    <th class="num" aria-sort="descending">
+                      <button
+                        type="button"
+                        class="sort-btn active"
+                        data-sort="accessed"
+                      >
+                        <span class="sort-arrow" aria-hidden="true">
+                          ↓
+                        </span>
+                        Accessed
+                      </button>
+                    </th>
                   </tr>
                 </thead>
                 <tbody id="paths-body">
@@ -366,13 +391,14 @@ export function DashboardPage({ data }: { data: DashboardData }) {
                             </div>
                           </td>
                           <td class="mono muted">
-                            <span class="scope-label">
+                            <span class="scope-label" title={item.scope}>
                               <span
                                 class={`dot ${item.scope === "main" ? "main" : "pr"}`}
                                 aria-hidden="true"
                               />
                               {prScope ? (
                                 <a
+                                  class="scope-text"
                                   href={`https://github.com/${encodeURIComponent(prScope.owner)}/${encodeURIComponent(prScope.repo)}/pull/${prScope.number}`}
                                   target="_blank"
                                   rel="noopener noreferrer"
@@ -380,7 +406,7 @@ export function DashboardPage({ data }: { data: DashboardData }) {
                                   {item.scope}
                                 </a>
                               ) : (
-                                item.scope
+                                <span class="scope-text">{item.scope}</span>
                               )}
                             </span>
                           </td>
@@ -425,7 +451,14 @@ export function DashboardPage({ data }: { data: DashboardData }) {
               <p class="empty-line">No active PR overlays.</p>
             ) : (
               <div class="table-scroll">
-                <table>
+                <table class="prs-table">
+                  <colgroup>
+                    <col class="col-repo" />
+                    <col class="col-count" />
+                    <col class="col-time" />
+                    <col class="col-time" />
+                    <col class="col-actions" />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>Repository</th>
@@ -522,75 +555,104 @@ export function DashboardPage({ data }: { data: DashboardData }) {
             {data.owners.length === 0 ? (
               <p class="empty-line">No owners configured.</p>
             ) : (
-              <ul class="owner-list">
-                {data.owners.map((owner) => {
-                  const share =
-                    owner.total_bytes > 0
-                      ? Math.max(0.02, owner.total_bytes / maxOwnerBytes)
-                      : 0;
+              <div class="table-scroll">
+                <table class="owners-table">
+                  <colgroup>
+                    <col class="col-owner-name" />
+                    <col class="col-share" />
+                    <col class="col-size" />
+                    <col class="col-count" />
+                    <col class="col-count" />
+                    <col class="col-count" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>Owner</th>
+                      <th class="share-col" aria-label="Storage share" />
+                      <th class="num">Size</th>
+                      <th class="num">Blobs</th>
+                      <th class="num">Unref</th>
+                      <th class="num">PRs</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.owners.map((owner) => {
+                      const share =
+                        owner.total_bytes > 0
+                          ? Math.max(0.02, owner.total_bytes / maxOwnerBytes)
+                          : 0;
 
-                  const pkgBase =
-                    owner.owner_type === "org"
-                      ? `https://github.com/orgs/${encodeURIComponent(owner.name)}/packages/container/package`
-                      : `https://github.com/users/${encodeURIComponent(owner.name)}/packages/container/package`;
+                      const pkgBase =
+                        owner.owner_type === "org"
+                          ? `https://github.com/orgs/${encodeURIComponent(owner.name)}/packages/container/package`
+                          : `https://github.com/users/${encodeURIComponent(owner.name)}/packages/container/package`;
 
-                  return (
-                    <li class="owner-row">
-                      <div class="owner-grid">
-                        <div class="owner-name mono">
-                          <a
-                            href={`https://github.com/${encodeURIComponent(owner.name)}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            <strong>{owner.name}</strong>
-                          </a>
-                          <span class="faint">{owner.owner_type}</span>
-                        </div>
-                        <div
-                          class="share-bar"
-                          style={`--share:${share.toFixed(4)}`}
-                          aria-hidden="true"
-                        />
-                        <div class="owner-meta mono">
-                          <span>
-                            <strong>{formatBytes(owner.total_bytes)}</strong>
-                          </span>
-                          <span>{owner.total_blobs} blobs</span>
-                          {owner.unreferenced_blobs > 0 && (
-                            <span>{owner.unreferenced_blobs} unref</span>
+                      const hasBlocked = owner.blocked_blobs.length > 0;
+
+                      return (
+                        <>
+                          <tr class={hasBlocked ? "owner-has-blocked" : ""}>
+                            <td class="mono">
+                              <span class="owner-name">
+                                <a
+                                  href={`https://github.com/${encodeURIComponent(owner.name)}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                >
+                                  <strong>{owner.name}</strong>
+                                </a>
+                                <span class="faint">{owner.owner_type}</span>
+                              </span>
+                            </td>
+                            <td class="share-col">
+                              <div
+                                class="share-bar"
+                                style={`--share:${share.toFixed(4)}`}
+                                aria-hidden="true"
+                              />
+                            </td>
+                            <td class="num mono">
+                              <strong>{formatBytes(owner.total_bytes)}</strong>
+                            </td>
+                            <td class="num mono muted">{owner.total_blobs}</td>
+                            <td
+                              class={`num mono ${owner.unreferenced_blobs > 0 ? "muted" : "faint"}`}
+                            >
+                              {owner.unreferenced_blobs}
+                            </td>
+                            <td
+                              class={`num mono ${owner.active_prs > 0 ? "muted" : "faint"}`}
+                            >
+                              {owner.active_prs}
+                            </td>
+                          </tr>
+                          {hasBlocked && (
+                            <tr class="blocked-row">
+                              <td colSpan={6}>
+                                <ul class="blocked-list mono">
+                                  {owner.blocked_blobs.map((b) => (
+                                    <li>
+                                      gc-blocked:{" "}
+                                      <a
+                                        href={`${pkgBase}/${encodeURIComponent(b.ghcr_package)}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                      >
+                                        {b.ghcr_package}
+                                      </a>{" "}
+                                      {b.manifest_digest.slice(0, 19)}…
+                                    </li>
+                                  ))}
+                                </ul>
+                              </td>
+                            </tr>
                           )}
-                          {owner.active_prs > 0 && (
-                            <span>{owner.active_prs} PRs</span>
-                          )}
-                          {owner.blocked_blobs.length > 0 && (
-                            <span class="warn-text">
-                              {owner.blocked_blobs.length} blocked
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      {owner.blocked_blobs.length > 0 && (
-                        <ul class="blocked-list mono">
-                          {owner.blocked_blobs.map((b) => (
-                            <li>
-                              gc-blocked:{" "}
-                              <a
-                                href={`${pkgBase}/${encodeURIComponent(b.ghcr_package)}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                {b.ghcr_package}
-                              </a>{" "}
-                              {b.manifest_digest.slice(0, 19)}…
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
+                        </>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             )}
           </section>
         </main>

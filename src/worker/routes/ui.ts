@@ -3,6 +3,7 @@ import { html } from "hono/html";
 
 import { unixNow } from "../../shared/nix-format.ts";
 import type { OwnerStatusSummary } from "../../shared/protocol.ts";
+import type { StorePathSort } from "../db.ts";
 import { cacheStats, listPrScopes, listStorePaths, ownerStats } from "../db.ts";
 import { DashboardPage } from "../ui/page.tsx";
 import type { AppBindings } from "./cache.ts";
@@ -66,11 +67,23 @@ export async function handlePublicPaths(
   }
   const scope = c.req.query("scope") || null;
   const query = c.req.query("q")?.trim() || null;
+  const sortRaw = c.req.query("sort") || "accessed";
+  if (sortRaw !== "accessed" && sortRaw !== "size") {
+    return c.text(`invalid sort '${sortRaw}'`, 400);
+  }
+  const sort: StorePathSort = sortRaw;
   const limitRaw = Number.parseInt(c.req.query("limit") ?? "50", 10);
   const limit =
     Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
 
-  const paths = await listStorePaths(c.env.DB, owner, scope, limit, query);
+  const paths = await listStorePaths(
+    c.env.DB,
+    owner,
+    scope,
+    limit,
+    query,
+    sort,
+  );
 
   return c.json(paths);
 }

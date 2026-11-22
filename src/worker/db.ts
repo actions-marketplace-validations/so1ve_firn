@@ -563,14 +563,21 @@ export async function ownerStats(
   };
 }
 
+export type StorePathSort = "accessed" | "size";
+
 export async function listStorePaths(
   db: D1Database,
   ownerId: string | null,
   scope: string | null,
   limit: number,
   query: string | null = null,
+  sort: StorePathSort = "accessed",
 ): Promise<StorePathSummary[]> {
   const likePattern = query ? `%${query}%` : null;
+  const orderBy =
+    sort === "size"
+      ? "b.file_size DESC, sp.id DESC"
+      : "sp.last_accessed_at DESC, sp.id DESC";
   const result = await db
     .prepare(
       `SELECT b.owner_id, sp.scope, sp.store_path, b.file_size, sp.last_accessed_at
@@ -579,7 +586,7 @@ export async function listStorePaths(
        WHERE (?1 IS NULL OR b.owner_id = ?1)
          AND (?2 IS NULL OR sp.scope = ?2)
          AND (?3 IS NULL OR sp.store_path LIKE ?3)
-       ORDER BY sp.last_accessed_at DESC, sp.id DESC
+       ORDER BY ${orderBy}
        LIMIT ?4`,
     )
     .bind(ownerId, scope, likePattern, limit)

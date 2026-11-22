@@ -109,14 +109,16 @@ export const CLIENT_SCRIPT = `
     });
   });
 
-  // Live store paths filter
+  // Live store paths filter & sort
   const searchInput = document.getElementById("filter-q");
   const ownerSelect = document.getElementById("filter-owner");
   const scopeSelect = document.getElementById("filter-scope");
   const limitSelect = document.getElementById("filter-limit");
+  const sortButtons = document.querySelectorAll(".sort-btn[data-sort]");
   const pathsBody = document.getElementById("paths-body");
   const pathsStatus = document.getElementById("paths-status");
 
+  let currentSort = "accessed";
   let filterTimer = null;
   let activeController = null;
 
@@ -130,6 +132,7 @@ export const CLIENT_SCRIPT = `
     if (ownerSelect && ownerSelect.value) params.set("owner", ownerSelect.value);
     if (scopeSelect && scopeSelect.value) params.set("scope", scopeSelect.value);
     if (limitSelect && limitSelect.value) params.set("limit", limitSelect.value);
+    params.set("sort", currentSort);
 
     if (pathsStatus) pathsStatus.textContent = "loading…";
     showNotice("paths-error", "", "");
@@ -193,18 +196,23 @@ export const CLIENT_SCRIPT = `
           tdScope.className = "mono muted";
           const label = document.createElement("span");
           label.className = "scope-label";
+          label.title = item.scope;
           const dot = document.createElement("span");
           dot.className = "dot " + (item.scope === "main" ? "main" : "pr");
           dot.setAttribute("aria-hidden", "true");
-          label.append(
-            dot,
-            prScope
-              ? extLink(
-                  "https://github.com/" + encodeURIComponent(prScope.owner) + "/" + encodeURIComponent(prScope.repo) + "/pull/" + prScope.number,
-                  item.scope,
-                )
-              : document.createTextNode(item.scope),
-          );
+          let scopeNode;
+          if (prScope) {
+            scopeNode = extLink(
+              "https://github.com/" + encodeURIComponent(prScope.owner) + "/" + encodeURIComponent(prScope.repo) + "/pull/" + prScope.number,
+              item.scope,
+            );
+            scopeNode.className = "scope-text";
+          } else {
+            scopeNode = document.createElement("span");
+            scopeNode.className = "scope-text";
+            scopeNode.textContent = item.scope;
+          }
+          label.append(dot, scopeNode);
           tdScope.appendChild(label);
 
           const tdOwner = document.createElement("td");
@@ -242,6 +250,20 @@ export const CLIENT_SCRIPT = `
   }
   [ownerSelect, scopeSelect, limitSelect].forEach((el) => {
     if (el) el.addEventListener("change", refreshPaths);
+  });
+  sortButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = btn.getAttribute("data-sort");
+      if (!next || next === currentSort) return;
+      currentSort = next;
+      sortButtons.forEach((other) => {
+        const active = other.getAttribute("data-sort") === currentSort;
+        other.classList.toggle("active", active);
+        const th = other.closest("th");
+        if (th) th.setAttribute("aria-sort", active ? "descending" : "none");
+      });
+      refreshPaths();
+    });
   });
 
   // Admin drawer toggle / unlock / lock
