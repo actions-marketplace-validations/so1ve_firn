@@ -1,0 +1,15 @@
+.git
+.github
+.devenv
+.direnv
+.envrc
+target
+devenv.*
+flake.*
+nix
+README.md
+LICENSE
+renovate.json
+rust-toolchain.toml
+rustfmt.toml
+clippy.toml
