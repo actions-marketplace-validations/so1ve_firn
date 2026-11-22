@@ -19,6 +19,7 @@ import {
   handlePrNarInfo,
   handlePublicKeys,
 } from "./routes/cache.ts";
+import { handleDashboard, handlePublicPaths } from "./routes/ui.ts";
 import { handleUploadCommit, handleUploadPlan } from "./routes/upload.ts";
 import { handleWebhook } from "./routes/webhook.ts";
 
@@ -34,7 +35,9 @@ function createApp(): Hono<AppBindings> {
     await next();
   });
 
+  app.get("/", handleDashboard);
   app.get("/api/v1/public-keys", handlePublicKeys);
+  app.get("/api/v1/public/paths", handlePublicPaths);
   app.post("/api/v1/uploads/plan", handleUploadPlan);
   app.post("/api/v1/uploads/commit", handleUploadCommit);
   app.post("/api/v1/webhooks/github", handleWebhook);

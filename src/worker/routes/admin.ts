@@ -93,11 +93,12 @@ export async function handleAdminListPaths(
     return c.text(`unknown owner '${owner}'`, 400);
   }
   const scope = c.req.query("scope") || null;
+  const query = c.req.query("q")?.trim() || null;
   const limitRaw = Number.parseInt(c.req.query("limit") ?? "50", 10);
   const limit =
     Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 50;
 
-  const paths = await listStorePaths(c.env.DB, owner, scope, limit);
+  const paths = await listStorePaths(c.env.DB, owner, scope, limit, query);
 
   return c.json(paths);
 }

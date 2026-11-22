@@ -568,7 +568,9 @@ export async function listStorePaths(
   ownerId: string | null,
   scope: string | null,
   limit: number,
+  query: string | null = null,
 ): Promise<StorePathSummary[]> {
+  const likePattern = query ? `%${query}%` : null;
   const result = await db
     .prepare(
       `SELECT b.owner_id, sp.scope, sp.store_path, b.file_size, sp.last_accessed_at
@@ -576,10 +578,11 @@ export async function listStorePaths(
        JOIN blobs b ON b.id = sp.blob_id
        WHERE (?1 IS NULL OR b.owner_id = ?1)
          AND (?2 IS NULL OR sp.scope = ?2)
+         AND (?3 IS NULL OR sp.store_path LIKE ?3)
        ORDER BY sp.last_accessed_at DESC, sp.id DESC
-       LIMIT ?3`,
+       LIMIT ?4`,
     )
-    .bind(ownerId, scope, limit)
+    .bind(ownerId, scope, likePattern, limit)
     .all<StorePathSummary>();
 
   return result.results;

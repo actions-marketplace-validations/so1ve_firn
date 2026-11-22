@@ -19,6 +19,7 @@ import type {
   PlanRequest,
   PlanResponse,
 } from "../shared/protocol.ts";
+import { err, formatBytes, out } from "./format.ts";
 
 const execFileAsync = promisify(execFile);
 const COMMIT_BATCH_SIZE = 50;
@@ -327,7 +328,7 @@ async function mapWithConcurrency<T, R>(
 export async function runPush(options: PushOptions): Promise<void> {
   const rawPaths = await collectInputPaths(options);
   if (rawPaths.length === 0) {
-    console.error("No store paths provided; nothing to push.");
+    console.error(`${err.dim("▸")} No store paths provided; nothing to push.`);
 
     return;
   }
@@ -342,7 +343,7 @@ export async function runPush(options: PushOptions): Promise<void> {
   );
   if (candidates.length === 0) {
     console.error(
-      "All store paths are already signed by skipped upstream keys; nothing to push.",
+      `${err.green("✓")} All ${closure.length} store paths are already signed by skipped upstream keys; nothing to push.`,
     );
 
     return;
@@ -363,14 +364,14 @@ export async function runPush(options: PushOptions): Promise<void> {
 
   if (plan.missing.length === 0) {
     console.error(
-      `All ${candidates.length} store paths are already cached (scope=${plan.scope}).`,
+      `${err.green("✓")} All ${candidates.length} store paths are already cached ${err.dim(`(scope=${plan.scope})`)}`,
     );
 
     return;
   }
 
   console.error(
-    `Uploading ${plan.missing.length}/${candidates.length} store paths to ${plan.ghcr_repository} (scope=${plan.scope})`,
+    `${err.cyan("▸")} Uploading ${err.bold(String(plan.missing.length))}${err.dim(`/${candidates.length}`)} store paths to ${err.bold(plan.ghcr_repository)} ${err.dim(`(scope=${plan.scope})`)}`,
   );
 
   const oci = new OciClient(plan.registry);
@@ -393,14 +394,30 @@ export async function runPush(options: PushOptions): Promise<void> {
     .map((hash) => byHash.get(hash))
     .filter((item): item is NixPathInfo => item !== undefined);
 
-  const entries = await mapWithConcurrency(missingInfos, options.jobs, (info) =>
-    uploadSinglePath(
-      oci,
-      plan.ghcr_repository,
-      pushToken,
-      info,
-      options.zstdLevel,
-    ),
+  let uploadedCount = 0;
+  let uploadedBytes = 0;
+  const entries = await mapWithConcurrency(
+    missingInfos,
+    options.jobs,
+    async (info) => {
+      const entry = await uploadSinglePath(
+        oci,
+        plan.ghcr_repository,
+        pushToken,
+        info,
+        options.zstdLevel,
+      );
+      uploadedCount += 1;
+      uploadedBytes += entry.file_size;
+      const baseName = info.path.startsWith("/nix/store/")
+        ? info.path.slice("/nix/store/".length + 33)
+        : info.path;
+      console.error(
+        `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${baseName} ${err.dim(`(${formatBytes(entry.file_size)})`)}`,
+      );
+
+      return entry;
+    },
   );
 
   let totalCommitted = 0;
@@ -423,6 +440,6 @@ export async function runPush(options: PushOptions): Promise<void> {
   }
 
   console.log(
-    `Committed ${totalCommitted} store paths to ${serverUrl} (scope=${lastScope}, owner=${lastOwner})`,
+    `${out.boldGreen("✓")} Committed ${out.bold(String(totalCommitted))} store paths ${out.dim(`(${formatBytes(uploadedBytes)})`)} to ${out.cyan(serverUrl)} ${out.dim(`(scope=${lastScope}, owner=${lastOwner})`)}`,
   );
 }

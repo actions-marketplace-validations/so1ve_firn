@@ -22,26 +22,45 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
       mkPackage =
         pkgs:
-        pkgs.stdenvNoCC.mkDerivation {
-          pname = manifest.name;
-          inherit (manifest) version;
-
+        let
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
               ./package.json
+              ./pnpm-lock.yaml
+              ./pnpm-workspace.yaml
               ./src/cli
               ./src/shared
             ];
           };
+        in
+        pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
+          pname = manifest.name;
+          inherit (manifest) version;
+          inherit src;
 
-          nativeBuildInputs = [ pkgs.makeWrapper ];
+          pnpmDeps = pkgs.fetchPnpmDeps {
+            inherit (finalAttrs) pname version src;
+            fetcherVersion = 5;
+            pnpmInstallFlags = [ "--prod" ];
+            hash = "sha256-BDgAwtsN3029mYLPT+wXnOCPvaQ73fh0d5e+ggt3Pow=";
+          };
+
+          pnpmInstallFlags = [ "--prod" ];
+
+          nativeBuildInputs = [
+            pkgs.installShellFiles
+            pkgs.makeWrapper
+            pkgs.nodejs_24
+            pkgs.pnpm
+            pkgs.pnpmConfigHook
+          ];
 
           installPhase = ''
             runHook preInstall
 
             mkdir -p "$out/bin" "$out/share/firn"
-            cp -r package.json src "$out/share/firn"
+            cp -r package.json src node_modules "$out/share/firn"
 
             makeWrapper ${pkgs.lib.getExe pkgs.nodejs_24} "$out/bin/firn" \
               --add-flags "$out/share/firn/src/cli/index.ts" \
@@ -51,6 +70,11 @@
                   pkgs.nodejs_24
                 ]
               }
+
+            installShellCompletion --cmd firn \
+              --bash <("$out/bin/firn" completions bash) \
+              --fish <("$out/bin/firn" completions fish) \
+              --zsh <("$out/bin/firn" completions zsh)
 
             runHook postInstall
           '';
@@ -62,7 +86,7 @@
             mainProgram = manifest.name;
             platforms = pkgs.lib.platforms.unix;
           };
-        };
+        });
     in
     {
       packages = forAllSystems (

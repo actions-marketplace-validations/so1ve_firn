@@ -21,6 +21,7 @@ import type {
   GcReport,
   PlanRequest,
   PlanResponse,
+  StorePathSummary,
 } from "../shared/protocol.ts";
 import {
   MAIN_SCOPE,
@@ -843,5 +844,73 @@ describe("firn worker", () => {
 
     expect(unref).toHaveLength(1);
     expect(unref[0]?.blobDigest).toBe("3".repeat(64));
+  });
+
+  it("renders dashboard HTML and filters public store paths", async () => {
+    const mainJwt = await signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/latchshot",
+      ref: "refs/heads/main",
+      event_name: "push",
+    });
+    const prJwt = await signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/latchshot",
+      ref: "refs/pull/42/merge",
+      event_name: "pull_request",
+    });
+
+    await uploadAndCommit(
+      mainJwt,
+      "so1ve/latchshot-cache",
+      "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hello-world",
+      "hello-nar",
+    );
+    await uploadAndCommit(
+      prJwt,
+      "so1ve/latchshot-cache",
+      "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-pr-preview",
+      "pr-nar",
+    );
+
+    const htmlRes = await callWorker(new Request("https://cache.so1ve.dev/"));
+
+    expect(htmlRes.status).toBe(200);
+    expect(htmlRes.headers.get("content-type")).toContain("text/html");
+
+    const body = await htmlRes.text();
+
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain(mainKey.publicString());
+    expect(body).toContain(prKey.publicString());
+    expect(body).toContain("hello-world");
+    expect(body).toContain("pr-preview");
+    expect(body).toContain("so1ve/latchshot");
+    expect(body).toContain("#42");
+
+    const filteredRes = await callWorker(
+      new Request(
+        "https://cache.so1ve.dev/api/v1/public/paths?q=preview&scope=pr:so1ve:latchshot:42",
+      ),
+    );
+
+    expect(filteredRes.status).toBe(200);
+
+    const filtered = await filteredRes.json<StorePathSummary[]>();
+
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]?.store_path).toContain("pr-preview");
+
+    const unknownOwnerRes = await callWorker(
+      new Request("https://cache.so1ve.dev/api/v1/public/paths?owner=nobody"),
+    );
+
+    expect(unknownOwnerRes.status).toBe(400);
   });
 });

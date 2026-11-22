@@ -1,66 +1,39 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import { parseArgs } from "node:util";
+
+import {
+  Clerc,
+  completionsPlugin,
+  friendlyErrorPlugin,
+  helpPlugin,
+  notFoundPlugin,
+  strictFlagsPlugin,
+  versionPlugin,
+} from "clerc";
 
 import manifest from "../../package.json" with { type: "json" };
 import { SigningKeyPair, unixNow } from "../shared/nix-format.ts";
 import type {
   AdminStatusResponse,
   GcReport,
+  OwnerStatusSummary,
   PrScopeSummary,
   StorePathSummary,
 } from "../shared/protocol.ts";
+import {
+  err,
+  formatAge,
+  formatBytes,
+  formatRemainingTtl,
+  formatScope,
+  formatStorePath,
+  out,
+  renderBanner,
+  renderKv,
+  renderSection,
+  renderTable,
+} from "./format.ts";
 import { runPush } from "./push.ts";
-
-const SECONDS_PER_MINUTE = 60;
-const SECONDS_PER_HOUR = 60 * 60;
-const SECONDS_PER_DAY = 24 * 60 * 60;
-
-function formatBytes(bytes: number): string {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let value = bytes;
-  let idx = 0;
-  while (value >= 1024 && idx + 1 < units.length) {
-    value /= 1024;
-    idx += 1;
-  }
-
-  return idx === 0 ? `${bytes} B` : `${value.toFixed(2)} ${units[idx]}`;
-}
-
-function formatAge(now: number, timestamp: number): string {
-  const delta = Math.max(0, now - timestamp);
-  if (delta < SECONDS_PER_MINUTE) {
-    return `${delta}s ago`;
-  }
-  if (delta < SECONDS_PER_HOUR) {
-    return `${Math.floor(delta / SECONDS_PER_MINUTE)}m ago`;
-  }
-  if (delta < SECONDS_PER_DAY) {
-    return `${Math.floor(delta / SECONDS_PER_HOUR)}h ago`;
-  }
-
-  return `${Math.floor(delta / SECONDS_PER_DAY)}d ago`;
-}
-
-function formatRemainingTtl(
-  now: number,
-  updatedAt: number,
-  ttlDays: number,
-): string {
-  const remaining = updatedAt + ttlDays * SECONDS_PER_DAY - now;
-  if (remaining <= 0) {
-    return "expired";
-  }
-  if (remaining < SECONDS_PER_HOUR) {
-    return `${Math.max(1, Math.floor(remaining / SECONDS_PER_MINUTE))}m left`;
-  }
-  if (remaining < SECONDS_PER_DAY) {
-    return `${Math.floor(remaining / SECONDS_PER_HOUR)}h left`;
-  }
-
-  return `${Math.floor(remaining / SECONDS_PER_DAY)}d left`;
-}
 
 function requireServer(value: string | undefined): string {
   const server = (value ?? process.env.FIRN_SERVER ?? "")
@@ -104,363 +77,577 @@ async function adminRequest<T>(
   return await response.json();
 }
 
-async function handleKeygen(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args,
-    allowPositionals: true,
-    options: {
-      "secret-out": { type: "string", short: "s" },
-      "public-out": { type: "string", short: "p" },
-      "help": { type: "boolean", short: "h", default: false },
-    },
-    strict: true,
-  });
+const adminAuthFlags = {
+  server: {
+    type: String,
+    description: "Base URL of the Firn server (env: FIRN_SERVER)",
+  },
+  token: {
+    type: String,
+    description: "Admin Bearer token (env: FIRN_ADMIN_TOKEN)",
+  },
+} as const;
 
-  if (values.help || positionals.length !== 1) {
-    console.log("Usage: firn keygen <NAME> [-s FILE] [-p FILE]");
-    if (!values.help) {
-      process.exit(1);
-    }
-
-    return;
-  }
-
-  const pair = await SigningKeyPair.generate(positionals[0]);
-  const secret = pair.secretString();
-  const pub = pair.publicString();
-
-  if (values["secret-out"]) {
-    fs.writeFileSync(values["secret-out"], `${secret}\n`, { mode: 0o600 });
-    console.log(`Wrote secret key to ${values["secret-out"]}`);
-  } else {
-    console.log(`Secret key: ${secret}`);
-  }
-
-  if (values["public-out"]) {
-    fs.writeFileSync(values["public-out"], `${pub}\n`);
-    console.log(`Wrote public key to ${values["public-out"]}`);
-  } else {
-    console.log(`Public key: ${pub}`);
-  }
-}
-
-async function handlePush(args: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args,
-    allowPositionals: true,
-    options: {
-      "server": { type: "string" },
-      "owner": { type: "string" },
-      "token": { type: "string" },
-      "stdin": { type: "boolean", default: false },
-      "include-upstream": { type: "boolean", default: false },
-      "skip-signed-by": { type: "string", multiple: true },
-      "jobs": { type: "string", default: "4" },
-      "zstd-level": { type: "string", default: "3" },
-      "help": { type: "boolean", short: "h", default: false },
-    },
-    strict: true,
-  });
-
-  if (values.help) {
-    console.log(`Usage: firn push --server <URL> [options] [PATHS...]
-
-Options:
-  --server <URL>           Base URL of the Firn server (env: FIRN_SERVER)
-  --owner <NAME>           GitHub owner name (env: FIRN_OWNER)
-  --token <TOKEN>          Manual push Bearer token (env: FIRN_TOKEN)
-  --stdin                  Read newline-separated store paths from stdin
-  --include-upstream       Upload paths even if signed by cache.nixos.org
-  --skip-signed-by <KEY>   Signature key prefix to skip (repeatable)
-  --jobs <N>               Concurrent NAR uploads (default: 4)
-  --zstd-level <N>         Zstandard compression level (default: 3)`);
-
-    return;
-  }
-
-  const server = requireServer(values.server);
-  const skipSignedBy =
-    values["skip-signed-by"] && values["skip-signed-by"].length > 0
-      ? values["skip-signed-by"]
-      : ["cache.nixos.org-1:"];
-
-  await runPush({
-    server,
-    owner: values.owner ?? process.env.FIRN_OWNER,
-    token: values.token ?? process.env.FIRN_TOKEN,
-    stdin: values.stdin,
-    includeUpstream: values["include-upstream"],
-    skipSignedBy,
-    jobs: Number.parseInt(values.jobs, 10) || 4,
-    zstdLevel: Number.parseInt(values["zstd-level"], 10) || 3,
-    paths: positionals,
-  });
-}
-
-async function handleStatus(args: string[]): Promise<void> {
-  const { values } = parseArgs({
-    args,
-    options: {
-      server: { type: "string" },
-      token: { type: "string" },
-    },
-    strict: true,
-  });
-
-  const data = await adminRequest<AdminStatusResponse>(
-    requireServer(values.server),
-    requireAdminToken(values.token),
-    "GET",
-    "/api/v1/admin/status",
-  );
-
-  console.log(`Public URL:  ${data.public_base_url}`);
-  console.log(
-    `GC policy:   pr_ttl=${data.gc.pr_ttl_days}d, main_lru=${data.gc.main_lru_days}d`,
-  );
-  console.log(`Main key:    ${data.main_public_key}`);
-  console.log(`PR key:      ${data.pr_public_key}`);
-  console.log(
-    `Store paths: ${data.main_paths} main, ${data.pr_paths} pr (${data.active_prs} active PRs)`,
-  );
-
-  for (const owner of data.owners) {
-    console.log(`\n[${owner.name}] (${owner.owner_type})`);
-    console.log(`  active PRs:   ${owner.active_prs}`);
-    console.log(
-      `  blobs:        ${owner.total_blobs} total (${formatBytes(owner.total_bytes)}), ${owner.unreferenced_blobs} unreferenced, ${owner.blocked_blobs.length} gc-blocked`,
-    );
-    for (const blocked of owner.blocked_blobs) {
-      console.log(
-        `  blocked:      ${blocked.ghcr_package} ${blocked.manifest_digest} (${blocked.reason})`,
-      );
-    }
-  }
-}
-
-async function handleLs(args: string[]): Promise<void> {
-  const { values } = parseArgs({
-    args,
-    options: {
-      server: { type: "string" },
-      token: { type: "string" },
-      owner: { type: "string" },
-      scope: { type: "string" },
-      limit: { type: "string", default: "50" },
-    },
-    strict: true,
-  });
-
-  const params = new URLSearchParams({ limit: values.limit });
-  if (values.owner) {
-    params.set("owner", values.owner);
-  }
-  if (values.scope) {
-    params.set("scope", values.scope);
-  }
-
-  const items = await adminRequest<StorePathSummary[]>(
-    requireServer(values.server),
-    requireAdminToken(values.token),
-    "GET",
-    `/api/v1/admin/paths?${params.toString()}`,
-  );
-
-  if (items.length === 0) {
-    console.log("No cached store paths found.");
-
-    return;
-  }
-
-  const now = unixNow();
-  console.log(
-    `${"OWNER".padEnd(12)} ${"SCOPE".padEnd(24)} ${"SIZE".padStart(10)} ${"ACCESSED".padStart(10)}  STORE PATH`,
-  );
-  for (const item of items) {
-    console.log(
-      `${item.owner_id.padEnd(12)} ${item.scope.padEnd(24)} ${formatBytes(item.file_size).padStart(10)} ${formatAge(now, item.last_accessed_at).padStart(10)}  ${item.store_path}`,
-    );
-  }
-}
-
-async function handlePr(args: string[]): Promise<void> {
-  const [sub, ...rest] = args;
-  if (sub === "ls") {
-    const { values } = parseArgs({
-      args: rest,
-      options: {
-        server: { type: "string" },
-        token: { type: "string" },
-        owner: { type: "string" },
+const cli = Clerc.create({
+  scriptName: "firn",
+  description: manifest.description,
+  version: manifest.version,
+})
+  .use(versionPlugin())
+  .use(
+    helpPlugin({
+      groups: {
+        commands: [
+          ["cache", "Cache"],
+          ["admin", "Administration"],
+        ],
       },
-      strict: true,
-    });
-    const server = requireServer(values.server);
-    const token = requireAdminToken(values.token);
-    const status = await adminRequest<AdminStatusResponse>(
+      notes: [
+        "Environment variables:",
+        "  FIRN_SERVER       Base URL of the Firn server",
+        "  FIRN_TOKEN        Static Bearer token for manual pushes",
+        "  FIRN_OWNER        GitHub owner name for manual pushes",
+        "  FIRN_ADMIN_TOKEN  Admin Bearer token for status / ls / pr / gc",
+      ],
+    }),
+  )
+  .use(completionsPlugin())
+  .use(strictFlagsPlugin())
+  .use(notFoundPlugin())
+  .use(friendlyErrorPlugin())
+  .errorHandler((error) => {
+    console.error(
+      `${err.boldRed("✗ Error:")} ${error instanceof Error ? error.message : String(error)}`,
+    );
+    process.exit(1);
+  })
+  .command("push", "Push Nix store paths and their closures to a Firn server", {
+    help: { group: "cache" },
+    parameters: ["[paths...]"],
+    flags: {
+      server: {
+        type: String,
+        description: "Base URL of the Firn server (env: FIRN_SERVER)",
+      },
+      owner: {
+        type: String,
+        description: "GitHub owner name (env: FIRN_OWNER)",
+      },
+      token: {
+        type: String,
+        description: "Manual push Bearer token (env: FIRN_TOKEN)",
+      },
+      stdin: {
+        type: Boolean,
+        default: false,
+        description: "Read newline-separated store paths from stdin",
+      },
+      includeUpstream: {
+        type: Boolean,
+        default: false,
+        description: "Upload paths even if signed by cache.nixos.org",
+      },
+      skipSignedBy: {
+        type: [String],
+        description: "Signature key prefix to skip (repeatable)",
+      },
+      jobs: {
+        type: Number,
+        default: 4,
+        description: "Concurrent NAR uploads",
+      },
+      zstdLevel: {
+        type: Number,
+        default: 3,
+        description: "Zstandard compression level",
+      },
+    },
+  })
+  .on("push", async (ctx) => {
+    const server = requireServer(ctx.flags.server);
+    const skipSignedBy =
+      ctx.flags.skipSignedBy.length > 0
+        ? ctx.flags.skipSignedBy
+        : ["cache.nixos.org-1:"];
+
+    await runPush({
       server,
-      token,
+      owner: ctx.flags.owner ?? process.env.FIRN_OWNER,
+      token: ctx.flags.token ?? process.env.FIRN_TOKEN,
+      stdin: ctx.flags.stdin,
+      includeUpstream: ctx.flags.includeUpstream,
+      skipSignedBy,
+      jobs: ctx.flags.jobs || 4,
+      zstdLevel: ctx.flags.zstdLevel || 3,
+      paths: ctx.parameters.paths,
+    });
+  })
+  .command("keygen", "Generate a Nix Ed25519 signing key pair", {
+    help: { group: "cache" },
+    parameters: ["<name>"],
+    flags: {
+      secretOut: {
+        type: String,
+        short: "s",
+        description: "Write secret key to file (mode 0600)",
+      },
+      publicOut: {
+        type: String,
+        short: "p",
+        description: "Write public key to file",
+      },
+    },
+  })
+  .on("keygen", async (ctx) => {
+    const pair = await SigningKeyPair.generate(ctx.parameters.name);
+    const secret = pair.secretString();
+    const pub = pair.publicString();
+
+    const entries: [string, string][] = [];
+    if (ctx.flags.secretOut) {
+      fs.writeFileSync(ctx.flags.secretOut, `${secret}\n`, { mode: 0o600 });
+      entries.push([
+        "Secret key",
+        `${out.green("wrote")} ${ctx.flags.secretOut}`,
+      ]);
+    } else {
+      entries.push(["Secret key", out.yellow(secret)]);
+    }
+
+    if (ctx.flags.publicOut) {
+      fs.writeFileSync(ctx.flags.publicOut, `${pub}\n`);
+      entries.push([
+        "Public key",
+        `${out.green("wrote")} ${ctx.flags.publicOut}`,
+      ]);
+    } else {
+      entries.push(["Public key", out.green(pub)]);
+    }
+
+    console.log(
+      `${out.boldGreen("✓")} Generated Ed25519 key pair ${out.bold(ctx.parameters.name)}`,
+    );
+    console.log(renderKv(entries));
+  })
+  .command("status", "Show cache keys, usage, and GC-blocked blobs", {
+    help: { group: "admin" },
+    flags: {
+      ...adminAuthFlags,
+      json: {
+        type: Boolean,
+        default: false,
+        description: "Output raw JSON",
+      },
+    },
+  })
+  .on("status", async (ctx) => {
+    const data = await adminRequest<AdminStatusResponse>(
+      requireServer(ctx.flags.server),
+      requireAdminToken(ctx.flags.token),
       "GET",
       "/api/v1/admin/status",
     );
-    const query = values.owner
-      ? `?owner=${encodeURIComponent(values.owner)}`
-      : "";
-    const prs = await adminRequest<PrScopeSummary[]>(
-      server,
-      token,
-      "GET",
-      `/api/v1/admin/prs${query}`,
+
+    if (ctx.flags.json) {
+      console.log(JSON.stringify(data, null, 2));
+
+      return;
+    }
+
+    const totalBlobs = data.owners.reduce((sum, o) => sum + o.total_blobs, 0);
+    const totalBytes = data.owners.reduce((sum, o) => sum + o.total_bytes, 0);
+    const totalBlocked = data.owners.reduce(
+      (sum, o) => sum + o.blocked_blobs.length,
+      0,
     );
 
-    if (prs.length === 0) {
-      console.log("No active PR overlays.");
+    console.log(renderBanner("Firn Cache", data.public_base_url));
+    console.log(renderSection("Overview"));
+    console.log(
+      renderKv([
+        [
+          "Policy",
+          `PR TTL ${out.bold(`${data.gc.pr_ttl_days}d`)}, Main LRU ${out.bold(`${data.gc.main_lru_days}d`)}`,
+        ],
+        [
+          "Store paths",
+          `${out.boldGreen(String(data.main_paths))} main, ${out.boldCyan(String(data.pr_paths))} pr ${out.dim(`(${data.active_prs} active PRs)`)}`,
+        ],
+        [
+          "Storage",
+          `${out.bold(String(totalBlobs))} blobs (${out.bold(formatBytes(totalBytes))})${
+            totalBlocked > 0
+              ? `, ${out.boldYellow(`${totalBlocked} gc-blocked`)}`
+              : ""
+          }`,
+        ],
+        ["Main key", out.dim(data.main_public_key)],
+        ["PR key", out.dim(data.pr_public_key)],
+      ]),
+    );
+
+    console.log(
+      renderSection(
+        "Owners & GHCR Storage",
+        `(${data.owners.length} configured)`,
+      ),
+    );
+    if (data.owners.length === 0) {
+      console.log(`  ${out.dim("No owners configured.")}`);
+    } else {
+      console.log(
+        renderTable<OwnerStatusSummary>(
+          [
+            { header: "OWNER", value: (o) => out.bold(o.name) },
+            { header: "TYPE", value: (o) => out.dim(o.owner_type) },
+            {
+              header: "BLOBS",
+              align: "right",
+              value: (o) => String(o.total_blobs),
+            },
+            {
+              header: "SIZE",
+              align: "right",
+              value: (o) => formatBytes(o.total_bytes),
+            },
+            {
+              header: "UNREF",
+              align: "right",
+              value: (o) =>
+                o.unreferenced_blobs > 0
+                  ? out.yellow(String(o.unreferenced_blobs))
+                  : out.dim("0"),
+            },
+            {
+              header: "ACTIVE PRS",
+              align: "right",
+              value: (o) =>
+                o.active_prs > 0
+                  ? out.cyan(String(o.active_prs))
+                  : out.dim("0"),
+            },
+            {
+              header: "GC-BLOCKED",
+              align: "right",
+              value: (o) =>
+                o.blocked_blobs.length > 0
+                  ? out.boldYellow(String(o.blocked_blobs.length))
+                  : out.dim("0"),
+            },
+          ],
+          data.owners,
+        ),
+      );
+    }
+
+    const blockedEntries = data.owners.flatMap((owner) =>
+      owner.blocked_blobs.map((blob) => ({ owner: owner.name, ...blob })),
+    );
+    if (blockedEntries.length > 0) {
+      console.log(
+        renderSection(
+          "GC-Blocked Blobs",
+          out.yellow(`(${blockedEntries.length} protected by GHCR)`),
+        ),
+      );
+      for (const item of blockedEntries) {
+        console.log(
+          `  ${out.yellow("!")} ${out.bold(`${item.owner}/${item.ghcr_package}`)} ${out.dim(`${item.manifest_digest.slice(0, 19)}…`)}`,
+        );
+        console.log(`    ${out.dim(item.reason)}`);
+      }
+    }
+  })
+  .command("ls", "List cached store paths ordered by recent access", {
+    help: { group: "admin" },
+    flags: {
+      ...adminAuthFlags,
+      owner: {
+        type: String,
+        description: "Filter by GitHub owner",
+      },
+      scope: {
+        type: String,
+        description: "Filter by scope (main or pr:<owner>:<repo>:<n>)",
+      },
+      query: {
+        type: String,
+        short: "q",
+        description: "Filter store paths by substring",
+      },
+      limit: {
+        type: Number,
+        default: 50,
+        description: "Maximum rows to return (max: 500)",
+      },
+      json: {
+        type: Boolean,
+        default: false,
+        description: "Output raw JSON",
+      },
+    },
+  })
+  .on("ls", async (ctx) => {
+    const params = new URLSearchParams({ limit: String(ctx.flags.limit) });
+    if (ctx.flags.owner) {
+      params.set("owner", ctx.flags.owner);
+    }
+    if (ctx.flags.scope) {
+      params.set("scope", ctx.flags.scope);
+    }
+    if (ctx.flags.query) {
+      params.set("q", ctx.flags.query);
+    }
+
+    const items = await adminRequest<StorePathSummary[]>(
+      requireServer(ctx.flags.server),
+      requireAdminToken(ctx.flags.token),
+      "GET",
+      `/api/v1/admin/paths?${params.toString()}`,
+    );
+
+    if (ctx.flags.json) {
+      console.log(JSON.stringify(items, null, 2));
+
+      return;
+    }
+
+    const filters = [
+      ctx.flags.owner ? `owner=${ctx.flags.owner}` : null,
+      ctx.flags.scope ? `scope=${ctx.flags.scope}` : null,
+      ctx.flags.query ? `q=${ctx.flags.query}` : null,
+    ].filter(Boolean);
+    const subtitle = [
+      `${items.length} shown`,
+      ...(filters.length > 0 ? [`(${filters.join(", ")})`] : []),
+    ].join(" ");
+
+    console.log(renderBanner("Store Paths", subtitle));
+    if (items.length === 0) {
+      console.log(`\n  ${out.dim("No cached store paths found.")}`);
 
       return;
     }
 
     const now = unixNow();
+    console.log("");
     console.log(
-      `${"OWNER".padEnd(12)} ${"REPO".padEnd(24)} ${"PR".padStart(6)} ${"PATHS".padStart(7)} ${"UPDATED".padStart(10)}  TTL`,
+      renderTable<StorePathSummary>(
+        [
+          { header: "OWNER", value: (item) => out.dim(item.owner_id) },
+          { header: "SCOPE", value: (item) => formatScope(item.scope) },
+          {
+            header: "SIZE",
+            align: "right",
+            value: (item) => formatBytes(item.file_size),
+          },
+          {
+            header: "ACCESSED",
+            align: "right",
+            value: (item) => out.dim(formatAge(now, item.last_accessed_at)),
+          },
+          {
+            header: "STORE PATH",
+            value: (item) => formatStorePath(item.store_path),
+          },
+        ],
+        items,
+      ),
     );
-    for (const pr of prs) {
-      console.log(
-        `${pr.owner_id.padEnd(12)} ${pr.repo.padEnd(24)} ${`#${pr.pr_number}`.padStart(6)} ${String(pr.path_count).padStart(7)} ${formatAge(now, pr.updated_at).padStart(10)}  ${formatRemainingTtl(now, pr.updated_at, status.gc.pr_ttl_days)}`,
-      );
-    }
-
-    return;
-  }
-
-  if (sub === "rm") {
-    const { values, positionals } = parseArgs({
-      args: rest,
-      allowPositionals: true,
-      options: {
-        server: { type: "string" },
-        token: { type: "string" },
+  })
+  .command("pr ls", "List active PR overlays and remaining TTL", {
+    help: { group: "admin" },
+    flags: {
+      ...adminAuthFlags,
+      owner: {
+        type: String,
+        description: "Filter by GitHub owner",
       },
-      strict: true,
-    });
-    if (positionals.length !== 3) {
-      throw new Error("Usage: firn pr rm <OWNER> <REPO> <NUMBER>");
+      json: {
+        type: Boolean,
+        default: false,
+        description: "Output raw JSON",
+      },
+    },
+  })
+  .on("pr ls", async (ctx) => {
+    const server = requireServer(ctx.flags.server);
+    const token = requireAdminToken(ctx.flags.token);
+    const [status, prs] = await Promise.all([
+      adminRequest<AdminStatusResponse>(
+        server,
+        token,
+        "GET",
+        "/api/v1/admin/status",
+      ),
+      adminRequest<PrScopeSummary[]>(
+        server,
+        token,
+        "GET",
+        `/api/v1/admin/prs${ctx.flags.owner ? `?owner=${encodeURIComponent(ctx.flags.owner)}` : ""}`,
+      ),
+    ]);
+
+    if (ctx.flags.json) {
+      console.log(JSON.stringify(prs, null, 2));
+
+      return;
     }
-    const [owner, repo, number] = positionals as [string, string, string];
+
+    console.log(
+      renderBanner(
+        "Active PR Overlays",
+        `${prs.length} active (TTL ${status.gc.pr_ttl_days}d)`,
+      ),
+    );
+    if (prs.length === 0) {
+      console.log(`\n  ${out.dim("No active PR overlays.")}`);
+
+      return;
+    }
+
+    const now = unixNow();
+    console.log("");
+    console.log(
+      renderTable<PrScopeSummary>(
+        [
+          {
+            header: "REPOSITORY",
+            value: (pr) => out.bold(`${pr.owner_id}/${pr.repo}`),
+          },
+          {
+            header: "PR",
+            align: "right",
+            value: (pr) => out.cyan(`#${pr.pr_number}`),
+          },
+          {
+            header: "PATHS",
+            align: "right",
+            value: (pr) => String(pr.path_count),
+          },
+          {
+            header: "UPDATED",
+            align: "right",
+            value: (pr) => out.dim(formatAge(now, pr.updated_at)),
+          },
+          {
+            header: "TTL",
+            value: (pr) => {
+              const ttl = formatRemainingTtl(
+                now,
+                pr.updated_at,
+                status.gc.pr_ttl_days,
+              );
+              if (ttl.state === "expired") {
+                return out.red(ttl.text);
+              }
+              if (ttl.state === "warn") {
+                return out.yellow(ttl.text);
+              }
+
+              return out.green(ttl.text);
+            },
+          },
+          {
+            header: "OVERLAY URL",
+            value: (pr) =>
+              out.dim(
+                `${status.public_base_url}/pr/${pr.owner_id}/${pr.repo}/${pr.pr_number}`,
+              ),
+          },
+        ],
+        prs,
+      ),
+    );
+  })
+  .command("pr rm", "Delete a PR overlay immediately", {
+    help: { group: "admin" },
+    parameters: ["<owner>", "<repo>", "<number>"],
+    flags: adminAuthFlags,
+  })
+  .on("pr rm", async (ctx) => {
+    const { owner, repo, number } = ctx.parameters;
     const res = await adminRequest<{ removed: number }>(
-      requireServer(values.server),
-      requireAdminToken(values.token),
+      requireServer(ctx.flags.server),
+      requireAdminToken(ctx.flags.token),
       "DELETE",
       `/api/v1/admin/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(number)}`,
     );
     console.log(
-      `Removed PR overlay ${owner}/${repo}#${number} (${res.removed} store paths deleted; unreferenced blobs will be cleaned on next GC)`,
+      `${out.boldGreen("✓")} Removed PR overlay ${out.bold(`${owner}/${repo}#${number}`)} ${out.dim(`(${res.removed} store paths deleted)`)}`,
+    );
+    console.log(
+      `  ${out.dim("Unreferenced GHCR blobs will be cleaned on the next GC pass.")}`,
+    );
+  })
+  .command("gc", "Trigger a garbage collection pass", {
+    help: { group: "admin" },
+    flags: {
+      ...adminAuthFlags,
+      dryRun: {
+        type: Boolean,
+        default: false,
+        description: "Report what would be deleted without deleting anything",
+      },
+      json: {
+        type: Boolean,
+        default: false,
+        description: "Output raw JSON",
+      },
+    },
+  })
+  .on("gc", async (ctx) => {
+    const query = ctx.flags.dryRun ? "?dry_run=true" : "";
+    const report = await adminRequest<GcReport>(
+      requireServer(ctx.flags.server),
+      requireAdminToken(ctx.flags.token),
+      "POST",
+      `/api/v1/admin/gc${query}`,
     );
 
-    return;
-  }
+    if (ctx.flags.json) {
+      console.log(JSON.stringify(report, null, 2));
 
-  throw new Error("Usage: firn pr <ls|rm> [options]");
-}
+      return;
+    }
 
-async function handleGc(args: string[]): Promise<void> {
-  const { values } = parseArgs({
-    args,
-    options: {
-      "server": { type: "string" },
-      "token": { type: "string" },
-      "dry-run": { type: "boolean", default: false },
-    },
-    strict: true,
+    console.log(
+      renderBanner(
+        "Garbage Collection",
+        ctx.flags.dryRun ? out.yellow("dry-run") : out.green("completed"),
+      ),
+    );
+    console.log("");
+    console.log(
+      renderKv([
+        ["PR paths removed", out.bold(String(report.pr_paths_removed))],
+        ["Main paths removed", out.bold(String(report.main_paths_removed))],
+        [
+          "Blobs deleted",
+          report.blobs_deleted > 0
+            ? out.boldGreen(String(report.blobs_deleted))
+            : out.dim("0"),
+        ],
+        [
+          "Blobs protected",
+          report.blobs_protected > 0
+            ? out.boldYellow(String(report.blobs_protected))
+            : out.dim("0"),
+        ],
+        [
+          "Blobs skipped",
+          report.blobs_skipped > 0
+            ? out.yellow(String(report.blobs_skipped))
+            : out.dim("0"),
+        ],
+        [
+          "Blob errors",
+          report.blob_errors > 0
+            ? out.boldRed(String(report.blob_errors))
+            : out.green("0"),
+        ],
+      ]),
+    );
   });
-  const query = values["dry-run"] ? "?dry_run=true" : "";
-  const report = await adminRequest<GcReport>(
-    requireServer(values.server),
-    requireAdminToken(values.token),
-    "POST",
-    `/api/v1/admin/gc${query}`,
-  );
-  console.log(
-    `GC finished (dry_run=${values["dry-run"]}): pr_paths_removed=${report.pr_paths_removed}, main_paths_removed=${report.main_paths_removed}, blobs_deleted=${report.blobs_deleted}, blobs_protected=${report.blobs_protected}, blobs_skipped=${report.blobs_skipped}, blob_errors=${report.blob_errors}`,
-  );
-}
 
-function printHelp(): void {
-  console.log(`firn ${manifest.version}
-
-Stateful Nix binary cache backed by GHCR and Cloudflare Workers + D1.
-
-Usage:
-  firn <command> [options]
-
-Commands:
-  push      Push Nix store paths and their closures to a Firn server
-  keygen    Generate a Nix Ed25519 signing key pair
-  status    Show cache keys, usage, and GC-blocked blobs
-  ls        List cached store paths ordered by recent access
-  pr ls     List active PR overlays and remaining TTL
-  pr rm     Delete a PR overlay immediately
-  gc        Trigger a garbage collection pass
-
-Environment variables:
-  FIRN_SERVER       Base URL of the Firn server
-  FIRN_TOKEN        Static Bearer token for manual pushes
-  FIRN_OWNER        GitHub owner name for manual pushes
-  FIRN_ADMIN_TOKEN  Admin Bearer token for status/ls/pr/gc`);
-}
-
-async function main(): Promise<void> {
-  const [command, ...rest] = process.argv.slice(2);
-  if (!command || command === "-h" || command === "--help") {
-    printHelp();
-
-    return;
-  }
-  if (command === "-V" || command === "--version") {
-    console.log(manifest.version);
-
-    return;
-  }
-
-  switch (command) {
-    case "push": {
-      await handlePush(rest);
-
-      break;
-    }
-    case "keygen": {
-      await handleKeygen(rest);
-
-      break;
-    }
-    case "status": {
-      await handleStatus(rest);
-
-      break;
-    }
-    case "ls": {
-      await handleLs(rest);
-
-      break;
-    }
-    case "pr": {
-      await handlePr(rest);
-
-      break;
-    }
-    case "gc": {
-      await handleGc(rest);
-
-      break;
-    }
-    default: {
-      throw new Error(`unknown command '${command}'. Run 'firn --help'.`);
-    }
-  }
-}
-
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-}
+await cli.parse();

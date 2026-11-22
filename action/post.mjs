@@ -1,12 +1,9 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
 
+import { runPush } from "../src/cli/push.ts";
 import { getInput, getState, listStoreEntries } from "./common.mjs";
 
-const CLI_ENTRY = path.resolve(import.meta.dirname, "../src/cli/index.ts");
-
-function main() {
+async function main() {
   if (getState("should_push") !== "true") {
     return;
   }
@@ -38,49 +35,35 @@ function main() {
   }
 
   const server = getInput("server").replace(/\/+$/, "");
-  const owner = getInput("owner");
-  const token = getInput("token");
-  const jobs = getInput("jobs");
+  const owner = getInput("owner") || undefined;
+  const token = getInput("token") || undefined;
+  const jobs = Number.parseInt(getInput("jobs"), 10) || 4;
   const includeUpstream = getInput("include-upstream").toLowerCase() === "true";
   const githubToken =
     getInput("github-token") || process.env.GITHUB_TOKEN || "";
 
-  const args = [CLI_ENTRY, "push", "--server", server, "--stdin"];
-  if (owner) {
-    args.push("--owner", owner);
-  }
-  if (token) {
-    args.push("--token", token);
-  }
-  if (jobs) {
-    args.push("--jobs", jobs);
-  }
-  if (includeUpstream) {
-    args.push("--include-upstream");
+  if (githubToken && !process.env.GITHUB_TOKEN) {
+    process.env.GITHUB_TOKEN = githubToken;
   }
 
   console.log(
     `Pushing ${newPaths.length} newly built Nix store paths to ${server}`,
   );
-  const result = spawnSync(process.execPath, args, {
-    input: `${newPaths.join("\n")}\n`,
-    stdio: ["pipe", "inherit", "inherit"],
-    env: {
-      ...process.env,
-      ...(githubToken ? { GITHUB_TOKEN: githubToken } : {}),
-    },
+  await runPush({
+    server,
+    owner,
+    token,
+    stdin: false,
+    includeUpstream,
+    skipSignedBy: ["cache.nixos.org-1:"],
+    jobs,
+    zstdLevel: 3,
+    paths: newPaths,
   });
-
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
   console.error(
     `::error::${error instanceof Error ? error.message : String(error)}`,
