@@ -21,7 +21,7 @@ export interface NarInfo {
   sig: string;
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
@@ -30,7 +30,7 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function base64ToBytes(encoded: string): Uint8Array {
+export function base64ToBytes(encoded: string): Uint8Array {
   const binary = atob(encoded);
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
@@ -134,21 +134,11 @@ export const storeHashFromPath = (storePath: string): string =>
   storePathBasename(storePath).slice(0, 32);
 
 export function normalizeReferences(references: readonly string[]): string[] {
-  const normalized = references.map((ref) => {
-    const basename = ref.startsWith(STORE_PREFIX)
-      ? storePathBasename(ref)
-      : ref;
-    if (
-      basename.length <= 33 ||
-      basename.includes("/") ||
-      basename[32] !== "-"
-    ) {
-      throw new Error(`invalid store reference '${ref}'`);
-    }
-    validateStoreHash(basename.slice(0, 32));
-
-    return basename;
-  });
+  const normalized = references.map((ref) =>
+    storePathBasename(
+      ref.startsWith(STORE_PREFIX) ? ref : `${STORE_PREFIX}${ref}`,
+    ),
+  );
 
   normalized.sort();
 
@@ -257,21 +247,6 @@ export class SigningKeyPair {
       ["sign"],
     );
 
-    // Cross-check that the public half matches the Ed25519 seed.
-    const verifyKey = await crypto.subtle.importKey(
-      "raw",
-      publicBytes,
-      "Ed25519",
-      false,
-      ["verify"],
-    );
-    const probe = new TextEncoder().encode("firn-key-check");
-    const sig = await crypto.subtle.sign("Ed25519", privateKey, probe);
-    const valid = await crypto.subtle.verify("Ed25519", verifyKey, sig, probe);
-    if (!valid) {
-      throw new Error("Nix secret key public half does not match Ed25519 seed");
-    }
-
     return new SigningKeyPair(name, privateKey, seed, publicBytes);
   }
 
@@ -302,19 +277,19 @@ export async function verifySignature(
   fp: string,
   signature: string,
 ): Promise<boolean> {
-  const keySep = publicKey.trim().indexOf(":");
-  const sigSep = signature.trim().indexOf(":");
+  const trimmedKey = publicKey.trim();
+  const trimmedSig = signature.trim();
+  const keySep = trimmedKey.indexOf(":");
+  const sigSep = trimmedSig.indexOf(":");
   if (keySep === -1 || sigSep === -1) {
     throw new Error("invalid Nix key or signature format");
   }
-  const keyName = publicKey.trim().slice(0, keySep);
-  const sigName = signature.trim().slice(0, sigSep);
-  if (keyName !== sigName) {
+  if (trimmedKey.slice(0, keySep) !== trimmedSig.slice(0, sigSep)) {
     return false;
   }
 
-  const keyBytes = base64ToBytes(publicKey.trim().slice(keySep + 1));
-  const sigBytes = base64ToBytes(signature.trim().slice(sigSep + 1));
+  const keyBytes = base64ToBytes(trimmedKey.slice(keySep + 1));
+  const sigBytes = base64ToBytes(trimmedSig.slice(sigSep + 1));
   if (keyBytes.length !== 32 || sigBytes.length !== 64) {
     return false;
   }

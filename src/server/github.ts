@@ -1,6 +1,11 @@
 import { timingSafeEqual } from "node:crypto";
 
-import { encodeHex, unixNow } from "../shared/nix-format.ts";
+import {
+  base64ToBytes,
+  bytesToBase64,
+  encodeHex,
+  unixNow,
+} from "../shared/nix-format.ts";
 import type { LoadedConfig, OwnerType } from "./config.ts";
 
 export interface OidcClaims {
@@ -27,31 +32,19 @@ interface JwkSet {
   keys: JwkKey[];
 }
 
-function base64UrlEncode(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return btoa(binary)
+const base64UrlEncode = (bytes: Uint8Array): string =>
+  bytesToBase64(bytes)
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replace(/=+$/, "");
-}
 
-function base64UrlDecode(segment: string): Uint8Array {
-  const padded = segment
-    .replaceAll("-", "+")
-    .replaceAll("_", "/")
-    .padEnd(Math.ceil(segment.length / 4) * 4, "=");
-  const binary = atob(padded);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    out[i] = binary.charCodeAt(i);
-  }
-
-  return out;
-}
+const base64UrlDecode = (segment: string): Uint8Array =>
+  base64ToBytes(
+    segment
+      .replaceAll("-", "+")
+      .replaceAll("_", "/")
+      .padEnd(Math.ceil(segment.length / 4) * 4, "="),
+  );
 
 function encodeDerLength(len: number): Uint8Array {
   if (len < 0x80) {

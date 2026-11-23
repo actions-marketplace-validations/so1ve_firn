@@ -55,8 +55,9 @@ export async function handleDashboard(
   );
 }
 
-export async function handlePublicPaths(
+export async function respondWithStorePaths(
   c: Context<AppBindings>,
+  maxLimit: number,
 ): Promise<Response> {
   const owner = c.req.query("owner") || null;
   if (owner && !c.get("config").ownersByName.has(owner)) {
@@ -71,7 +72,9 @@ export async function handlePublicPaths(
   const sort: StorePathSort = sortRaw;
   const limitRaw = Number.parseInt(c.req.query("limit") ?? "50", 10);
   const limit =
-    Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+    Number.isFinite(limitRaw) && limitRaw > 0
+      ? Math.min(limitRaw, maxLimit)
+      : 50;
 
   const paths = await listStorePaths(
     c.get("db"),
@@ -84,3 +87,6 @@ export async function handlePublicPaths(
 
   return c.json(paths);
 }
+
+export const handlePublicPaths = (c: Context<AppBindings>): Promise<Response> =>
+  respondWithStorePaths(c, 200);

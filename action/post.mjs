@@ -4,10 +4,7 @@ import { PushHttpError, runPush } from "../src/cli/push.ts";
 import { getInput, getState, listStoreEntries } from "./common.mjs";
 
 function readExplicitPaths() {
-  const fromInput = getInput("paths")
-    .split(/\s+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+  const fromInput = getInput("paths").split(/\s+/).filter(Boolean);
 
   const pathsFile = getState("paths_file");
   const fromFile =

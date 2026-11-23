@@ -101,6 +101,7 @@ const cli = Clerc.create({
         commands: [
           ["cache", "Cache"],
           ["admin", "Administration"],
+          ["server", "Server"],
         ],
       },
       notes: [
@@ -178,8 +179,8 @@ const cli = Clerc.create({
       stdin: ctx.flags.stdin,
       includeUpstream: ctx.flags.includeUpstream,
       skipSignedBy,
-      jobs: ctx.flags.jobs || 4,
-      zstdLevel: ctx.flags.zstdLevel || 3,
+      jobs: ctx.flags.jobs,
+      zstdLevel: ctx.flags.zstdLevel,
       paths: ctx.parameters.paths,
     });
   })
@@ -474,6 +475,20 @@ const cli = Clerc.create({
   .on("pr ls", async (ctx) => {
     const server = requireServer(ctx.flags.server);
     const token = requireAdminToken(ctx.flags.token);
+    const prsPath = `/api/v1/admin/prs${ctx.flags.owner ? `?owner=${encodeURIComponent(ctx.flags.owner)}` : ""}`;
+
+    if (ctx.flags.json) {
+      const prs = await adminRequest<PrScopeSummary[]>(
+        server,
+        token,
+        "GET",
+        prsPath,
+      );
+      console.log(JSON.stringify(prs, null, 2));
+
+      return;
+    }
+
     const [status, prs] = await Promise.all([
       adminRequest<AdminStatusResponse>(
         server,
@@ -481,19 +496,8 @@ const cli = Clerc.create({
         "GET",
         "/api/v1/admin/status",
       ),
-      adminRequest<PrScopeSummary[]>(
-        server,
-        token,
-        "GET",
-        `/api/v1/admin/prs${ctx.flags.owner ? `?owner=${encodeURIComponent(ctx.flags.owner)}` : ""}`,
-      ),
+      adminRequest<PrScopeSummary[]>(server, token, "GET", prsPath),
     ]);
-
-    if (ctx.flags.json) {
-      console.log(JSON.stringify(prs, null, 2));
-
-      return;
-    }
 
     console.log(
       renderBanner(
@@ -651,6 +655,7 @@ const cli = Clerc.create({
     );
   })
   .command("serve", "Run a self-hosted Firn server (Node SQLite or libSQL)", {
+    help: { group: "server" },
     flags: {
       host: {
         type: String,
@@ -702,6 +707,7 @@ const cli = Clerc.create({
     "migrate",
     "Apply SQL migrations to a SQLite or Turso/libSQL database",
     {
+      help: { group: "server" },
       flags: {
         db: {
           type: String,

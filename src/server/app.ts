@@ -30,7 +30,8 @@ export interface AppContext {
   waitUntil?: (promise: Promise<unknown>) => void;
 }
 
-export interface AppBindings {
+export interface AppBindings<E extends object = object> {
+  Bindings: E;
   Variables: {
     db: SqlDatabase;
     config: LoadedConfig;
@@ -38,8 +39,8 @@ export interface AppBindings {
   };
 }
 
-export type AppContextResolver = (
-  c: Context<AppBindings>,
+export type AppContextResolver<E extends object = object> = (
+  c: Context<AppBindings<E>>,
 ) => AppContext | Promise<AppContext>;
 
 function defaultWaitUntil(promise: Promise<unknown>): void {
@@ -53,10 +54,10 @@ function defaultWaitUntil(promise: Promise<unknown>): void {
   });
 }
 
-export function createApp(
-  resolveContext: AppContextResolver,
-): Hono<AppBindings> {
-  const app = new Hono<AppBindings>();
+export function createApp<E extends object = object>(
+  resolveContext: AppContextResolver<E>,
+): Hono<AppBindings<E>> {
+  const app = new Hono<AppBindings<E>>();
 
   app.get("/healthz", (c) => c.text("ok\n"));
   app.get("/nix-cache-info", () => handleMainCacheInfo());

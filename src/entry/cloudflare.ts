@@ -8,23 +8,21 @@ export interface CloudflareWorkerEnv extends ServerRuntimeEnv {
   DB: D1Database;
 }
 
+const app = createApp<CloudflareWorkerEnv>(async (c) => ({
+  db: d1Adapter(c.env.DB),
+  config: await loadConfig(c.env, { defaultMaxGcSubrequests: 40 }),
+  waitUntil: (promise) => {
+    c.executionCtx.waitUntil(promise);
+  },
+}));
+
 export default {
-  async fetch(
+  fetch(
     request: Request,
     env: CloudflareWorkerEnv,
     ctx: ExecutionContext,
-  ): Promise<Response> {
-    const config = await loadConfig(env, { defaultMaxGcSubrequests: 40 });
-    const db = d1Adapter(env.DB);
-    const app = createApp(() => ({
-      db,
-      config,
-      waitUntil: (promise) => {
-        ctx.waitUntil(promise);
-      },
-    }));
-
-    return app.fetch(request);
+  ): Response | Promise<Response> {
+    return app.fetch(request, env, ctx);
   },
 
   async scheduled(

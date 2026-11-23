@@ -36,6 +36,15 @@ const isRetryableStatus = (status: number): boolean =>
   status === 503 ||
   status === 504;
 
+const RETRY_UNIT_MS: Record<string, number> = {
+  m: 60_000,
+  s: 1000,
+  ms: 1,
+  us: 0.001,
+  µs: 0.001,
+  ns: 0.000001,
+};
+
 function parseRetryDelayMs(
   response: Response,
   body: string,
@@ -57,20 +66,10 @@ function parseRetryDelayMs(
     body,
   );
   if (ghcrMatch) {
-    const amount = Number(ghcrMatch[1]);
-    const unit = ghcrMatch[2].toLowerCase();
-    const factor =
-      unit === "m"
-        ? 60_000
-        : unit === "s"
-          ? 1000
-          : unit === "ms"
-            ? 1
-            : unit === "us" || unit === "µs"
-              ? 0.001
-              : 0.000001;
-    const ms = Math.ceil(amount * factor);
-    if (Number.isFinite(ms) && ms > 0) {
+    const ms = Math.ceil(
+      Number(ghcrMatch[1]) * RETRY_UNIT_MS[ghcrMatch[2].toLowerCase()],
+    );
+    if (ms > 0) {
       return Math.min(ms + Math.floor(Math.random() * 150), MAX_RETRY_DELAY_MS);
     }
   }
@@ -187,15 +186,9 @@ export class OciClient {
       );
     }
 
-    const blobUrl = `${this.#registryUrl}/v2/${repository}/blobs/${expectedLayerDigest}`;
-    const head = await this.#fetchWithRetry(blobUrl, {
-      method: "HEAD",
-      headers: { Authorization: `Bearer ${pullToken}` },
-      redirect: "manual",
-    });
-    if (!head.ok && (head.status < 300 || head.status >= 400)) {
+    if (!(await this.#blobExists(repository, pullToken, expectedLayerDigest))) {
       throw new Error(
-        `blob ${expectedLayerDigest} not accessible in ${repository} (${head.status})`,
+        `blob ${expectedLayerDigest} not accessible in ${repository}`,
       );
     }
   }

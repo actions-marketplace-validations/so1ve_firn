@@ -81,43 +81,29 @@ interface DumpedNar {
 export function parseNixPathInfoJson(raw: string): NixPathInfo[] {
   const parsed = JSON.parse(raw) as
     Record<string, RawPathInfo | null> | RawPathInfo[];
-  const results: NixPathInfo[] = [];
+  const entries: [string, RawPathInfo][] = Array.isArray(parsed)
+    ? parsed.map((item) => {
+        if (!item.path) {
+          throw new Error("path-info array item missing `path` field");
+        }
 
-  if (Array.isArray(parsed)) {
-    for (const item of parsed) {
-      if (!item.path) {
-        throw new Error("path-info array item missing `path` field");
-      }
-      results.push({
-        path: item.path,
-        storeHash: storeHashFromPath(item.path),
-        narSize: item.narSize,
-        deriver: item.deriver ?? null,
-        ca: item.ca ?? null,
-        references: normalizeReferences(item.references ?? []),
-        signatures: item.signatures ?? [],
-      });
-    }
-  } else {
-    for (const [storePath, entry] of Object.entries(parsed)) {
-      if (!entry) {
-        continue;
-      }
-      results.push({
-        path: storePath,
-        storeHash: storeHashFromPath(storePath),
-        narSize: entry.narSize,
-        deriver: entry.deriver ?? null,
-        ca: entry.ca ?? null,
-        references: normalizeReferences(entry.references ?? []),
-        signatures: entry.signatures ?? [],
-      });
-    }
-  }
+        return [item.path, item];
+      })
+    : Object.entries(parsed).filter(
+        (pair): pair is [string, RawPathInfo] => pair[1] !== null,
+      );
 
-  results.sort((a, b) => a.path.localeCompare(b.path));
-
-  return results;
+  return entries
+    .map(([storePath, item]) => ({
+      path: storePath,
+      storeHash: storeHashFromPath(storePath),
+      narSize: item.narSize,
+      deriver: item.deriver ?? null,
+      ca: item.ca ?? null,
+      references: normalizeReferences(item.references ?? []),
+      signatures: item.signatures ?? [],
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path));
 }
 
 async function queryNixClosure(paths: string[]): Promise<NixPathInfo[]> {
@@ -446,9 +432,14 @@ export async function runPush(options: PushOptions): Promise<void> {
       ),
   );
   const skippedUpstream = closure.length - candidates.length;
+  const skipSummary = [
+    skippedFods > 0 ? `fod-skipped=${skippedFods}` : "",
+    skippedUpstream > 0 ? `upstream-skipped=${skippedUpstream}` : "",
+  ].filter(Boolean);
+
   if (candidates.length === 0) {
     console.error(
-      `${err.green("✓")} Nothing to upload: 0 candidate paths ${err.dim(`(${[...(skippedFods > 0 ? [`fod-skipped=${skippedFods}`] : []), ...(skippedUpstream > 0 ? [`upstream-skipped=${skippedUpstream}`] : []), `closure=${rawClosure.length}`].join(", ")})`)}`,
+      `${err.green("✓")} Nothing to upload: 0 candidate paths ${err.dim(`(${[...skipSummary, `closure=${rawClosure.length}`].join(", ")})`)}`,
     );
 
     return;
@@ -461,15 +452,14 @@ export async function runPush(options: PushOptions): Promise<void> {
     `${serverUrl}/api/v1/uploads/plan`,
     await auth.getBearer(),
     {
-      ...(options.owner ? { owner: options.owner } : {}),
+      owner: options.owner,
       store_paths: candidates.map((item) => item.path),
     } satisfies PlanRequest,
   );
 
   const alreadyCached = candidates.length - plan.missing.length;
   const planMeta = [
-    ...(skippedFods > 0 ? [`fod-skipped=${skippedFods}`] : []),
-    ...(skippedUpstream > 0 ? [`upstream-skipped=${skippedUpstream}`] : []),
+    ...skipSummary,
     `closure=${closure.length}`,
     `scope=${plan.scope}`,
     `repo=${plan.ghcr_repository}`,
@@ -501,7 +491,7 @@ export async function runPush(options: PushOptions): Promise<void> {
             `${serverUrl}/api/v1/uploads/plan`,
             await auth.getBearer(),
             {
-              ...(options.owner ? { owner: options.owner } : {}),
+              owner: options.owner,
               store_paths: [],
             } satisfies PlanRequest,
           );
@@ -510,9 +500,7 @@ export async function runPush(options: PushOptions): Promise<void> {
         }, plan.ghcr_token);
 
   const byHash = new Map(candidates.map((item) => [item.storeHash, item]));
-  const missingInfos = plan.missing
-    .map((hash) => byHash.get(hash))
-    .filter((item): item is NixPathInfo => item !== undefined);
+  const missingInfos = plan.missing.map((hash) => byHash.get(hash)!);
 
   let uploadedCount = 0;
   let uploadedBytes = 0;
@@ -550,7 +538,7 @@ export async function runPush(options: PushOptions): Promise<void> {
       `${serverUrl}/api/v1/uploads/commit`,
       await auth.getBearer(),
       {
-        ...(options.owner ? { owner: options.owner } : {}),
+        owner: options.owner,
         entries,
       } satisfies CommitRequest,
     );

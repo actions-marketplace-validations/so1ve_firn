@@ -42,19 +42,12 @@ async function resolvePublicKeys(server, mainKeyInput, prKeyInput) {
 }
 
 function configureNix(server, mainKey, prKey, { isPr, prNumber, isForkPr }) {
-  if (!mainKey && !prKey) {
-    return;
-  }
-
   const usePrOverlay =
     isPr && prNumber && prKey && !isForkPr && process.env.GITHUB_REPOSITORY;
   const substituter = usePrOverlay
     ? `${server}/pr/${process.env.GITHUB_REPOSITORY}/${prNumber}`
     : server;
-  const keys = usePrOverlay
-    ? [mainKey, prKey].filter(Boolean)
-    : [mainKey].filter(Boolean);
-
+  const keys = (usePrOverlay ? [mainKey, prKey] : [mainKey]).filter(Boolean);
   if (keys.length === 0) {
     return;
   }
