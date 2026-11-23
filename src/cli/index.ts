@@ -653,7 +653,7 @@ const cli = Clerc.create({
 
         if (!ctx.flags.json) {
           console.error(
-            `  ${err.dim(`▸ round ${rounds}: deleted=${report.blobs_deleted} (+${step.blobs_deleted}), remaining>=${step.blobs_skipped}`)}`,
+            `  ${err.dim(`▸ round ${rounds}: ${report.blobs_deleted} blobs deleted (+${step.blobs_deleted})`)}`,
           );
         }
       }

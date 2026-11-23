@@ -652,9 +652,9 @@
         }
         showNotice(
           "admin-notice",
-          `Running GC (round ${rounds + 1})… blobs_deleted=${
-            totals.blobs_deleted
-          }, remaining=${r.blobs_skipped}`,
+          `Running GC (round ${rounds + 1})… ${totals.blobs_deleted} blobs deleted${
+            totals.blob_errors > 0 ? `, ${totals.blob_errors} errors` : ""
+          }`,
           "",
         );
         await refreshOverview();
