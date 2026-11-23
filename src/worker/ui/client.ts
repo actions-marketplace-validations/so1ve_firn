@@ -135,6 +135,43 @@ export const CLIENT_SCRIPT = `
     }
   }
 
+  async function refreshOverview() {
+    try {
+      const res = await fetch("/", { cache: "no-store" });
+      if (!res.ok) return;
+      const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+      const unlocked = Boolean(getToken());
+      for (const selector of [
+        ".summary-line",
+        'section[aria-labelledby="prs-heading"]',
+        'section[aria-labelledby="owners-heading"]',
+      ]) {
+        const cur = document.querySelector(selector);
+        const next = doc.querySelector(selector);
+        if (cur && next) {
+          cur.replaceWith(next);
+        }
+      }
+      if (unlocked) {
+        document.querySelectorAll(".admin-only").forEach((el) => {
+          el.hidden = false;
+        });
+      }
+      const nextScope = doc.getElementById("filter-scope");
+      if (scopeSelect && nextScope) {
+        const selected = scopeSelect.value;
+        scopeSelect.replaceChildren(...nextScope.children);
+        scopeSelect.value = selected;
+        if (scopeSelect.value !== selected) {
+          scopeSelect.value = "";
+        }
+        syncDeleteMatchingState();
+      }
+    } catch {
+      // Ignore transient refresh failures; primary action already succeeded.
+    }
+  }
+
   async function refreshPaths() {
     if (activeController) activeController.abort();
     activeController = new AbortController();
@@ -306,7 +343,7 @@ export const CLIENT_SCRIPT = `
           "Removed " + data.removed + " store paths. Run GC to delete unreferenced GHCR blobs.",
           "ok",
         );
-        refreshPaths();
+        await Promise.all([refreshPaths(), refreshOverview()]);
       } catch (error) {
         showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
       } finally {
@@ -353,6 +390,7 @@ export const CLIENT_SCRIPT = `
         "Removed " + data.removed + " store path. Run GC to delete unreferenced GHCR blobs.",
         "ok",
       );
+      refreshOverview();
     } catch (error) {
       btn.disabled = false;
       btn.removeAttribute("data-armed");
@@ -500,6 +538,7 @@ export const CLIENT_SCRIPT = `
             totals.blobs_deleted + ", remaining=" + r.blobs_skipped,
           "",
         );
+        await refreshOverview();
       }
 
       showNotice(
@@ -513,7 +552,7 @@ export const CLIENT_SCRIPT = `
           ", errors=" + totals.blob_errors,
         totals.blob_errors > 0 ? "error" : "ok",
       );
-      refreshPaths();
+      await Promise.all([refreshPaths(), refreshOverview()]);
     } catch (error) {
       showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
     } finally {
@@ -568,7 +607,7 @@ export const CLIENT_SCRIPT = `
         "Removed PR overlay " + target + " (" + data.removed + " paths deleted)",
         "ok",
       );
-      refreshPaths();
+      await Promise.all([refreshPaths(), refreshOverview()]);
     } catch (error) {
       btn.disabled = false;
       btn.removeAttribute("data-armed");
