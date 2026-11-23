@@ -32,6 +32,7 @@ describe("portable Firn server & database adapters", () => {
     expect(migrations.map((m) => m.name)).toEqual([
       "0001_init.sql",
       "0002_blob_version_id.sql",
+      "0003_query_indexes.sql",
     ]);
     expect(migrations.every((m) => m.statements.length > 0)).toBeTruthy();
   });

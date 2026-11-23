@@ -15,6 +15,7 @@ import type { LoadedConfig } from "../config.ts";
 import { ghcrRepository } from "../config.ts";
 import {
   MAIN_SCOPE,
+  TOUCH_THROTTLE_SECONDS,
   getBlobForDownload,
   getNarInfo,
   prScope,
@@ -61,7 +62,10 @@ async function serveNarInfo(
     return c.text("narinfo not found", 404);
   }
 
-  c.get("waitUntil")(touchAccessedThrottled(db, stored.id, unixNow()));
+  const now = unixNow();
+  if (now - stored.lastAccessedAt >= TOUCH_THROTTLE_SECONDS) {
+    c.get("waitUntil")(touchAccessedThrottled(db, stored.id, now));
+  }
 
   return textResponse(
     renderNarInfo(storedToNarInfo(stored)),

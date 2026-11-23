@@ -8,8 +8,8 @@ import type {
 import type { SqlDatabase, SqlStatement } from "./db/types.ts";
 
 export const MAIN_SCOPE = "main";
+export const TOUCH_THROTTLE_SECONDS = 24 * 60 * 60;
 
-const TOUCH_THROTTLE_SECONDS = 24 * 60 * 60;
 const SQL_BIND_CHUNK = 80;
 
 export const prScope = (
@@ -38,6 +38,7 @@ export interface StoredNarInfo {
   deriver: string | null;
   references: string[];
   signature: string;
+  lastAccessedAt: number;
 }
 
 export interface CommitRecord {
@@ -96,6 +97,7 @@ interface NarInfoRow {
   deriver: string | null;
   references_json: string;
   signature: string;
+  last_accessed_at: number;
 }
 
 interface BlobRow {
@@ -123,7 +125,8 @@ async function queryNarInfoInScope(
 ): Promise<StoredNarInfo | null> {
   const row = await db.first<NarInfoRow>(
     `SELECT sp.id, sp.store_path, sp.nar_hash, sp.nar_size, sp.file_hash,
-            b.file_size, b.blob_digest, sp.deriver, sp.references_json, sp.signature
+            b.file_size, b.blob_digest, sp.deriver, sp.references_json,
+            sp.signature, sp.last_accessed_at
      FROM store_paths sp
      JOIN blobs b ON b.id = sp.blob_id
      WHERE sp.scope = ?1 AND sp.store_hash = ?2`,
@@ -145,6 +148,7 @@ async function queryNarInfoInScope(
     deriver: row.deriver,
     references: JSON.parse(row.references_json) as string[],
     signature: row.signature,
+    lastAccessedAt: row.last_accessed_at,
   };
 }
 
@@ -281,12 +285,18 @@ export async function getBlobForDownload(
   scope: string,
   blobDigest: string,
 ): Promise<BlobRecord | null> {
+  // Use EXISTS so SQLite starts from blobs(blob_digest) instead of scanning
+  // all 'main' rows in store_paths via idx_store_paths_scope_hash.
   const row = await db.first<BlobRow>(
     `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
      FROM blobs b
-     JOIN store_paths sp ON sp.blob_id = b.id
      WHERE b.blob_digest = ?1
-       AND (sp.scope = ?2 OR sp.scope = 'main')
+       AND EXISTS (
+         SELECT 1
+         FROM store_paths sp
+         WHERE sp.blob_id = b.id
+           AND sp.scope IN (?2, 'main')
+       )
      LIMIT 1`,
     [blobDigest, scope],
   );
@@ -541,19 +551,19 @@ export async function markBlobGcBlocked(
 }
 
 export async function cacheStats(db: SqlDatabase): Promise<CacheStats> {
-  const [mainRow, prRow, activePrRow] = await Promise.all([
-    db.first<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM store_paths WHERE scope = 'main'",
-    ),
-    db.first<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM store_paths WHERE scope != 'main'",
+  const [pathsRow, activePrRow] = await Promise.all([
+    db.first<{ main_paths: number; pr_paths: number }>(
+      `SELECT
+         COALESCE(SUM(CASE WHEN scope = 'main' THEN 1 ELSE 0 END), 0) AS main_paths,
+         COALESCE(SUM(CASE WHEN scope != 'main' THEN 1 ELSE 0 END), 0) AS pr_paths
+       FROM store_paths`,
     ),
     db.first<{ count: number }>("SELECT COUNT(*) AS count FROM pr_scopes"),
   ]);
 
   return {
-    mainPaths: mainRow?.count ?? 0,
-    prPaths: prRow?.count ?? 0,
+    mainPaths: pathsRow?.main_paths ?? 0,
+    prPaths: pathsRow?.pr_paths ?? 0,
     activePrs: activePrRow?.count ?? 0,
   };
 }
@@ -562,38 +572,42 @@ export async function ownerStats(
   db: SqlDatabase,
   ownerId: string,
 ): Promise<OwnerStats> {
-  const [activePrRow, blobTotalsRow, unrefRow, blockedRows] = await Promise.all(
-    [
-      db.first<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM pr_scopes WHERE owner_id = ?1",
-        [ownerId],
-      ),
-      db.first<{ total_blobs: number; total_bytes: number }>(
-        "SELECT COUNT(*) AS total_blobs, COALESCE(SUM(file_size), 0) AS total_bytes FROM blobs WHERE owner_id = ?1",
-        [ownerId],
-      ),
-      db.first<{ count: number }>(
-        `SELECT COUNT(*) AS count FROM blobs b
-         WHERE b.owner_id = ?1
-           AND b.gc_blocked = 0
-           AND NOT EXISTS (SELECT 1 FROM store_paths sp WHERE sp.blob_id = b.id)`,
-        [ownerId],
-      ),
-      db.all<BlockedBlob>(
-        `SELECT ghcr_package, manifest_digest, COALESCE(gc_block_reason, '') AS reason
-         FROM blobs
-         WHERE owner_id = ?1 AND gc_blocked = 1
-         ORDER BY ghcr_package, manifest_digest`,
-        [ownerId],
-      ),
-    ],
-  );
+  const [activePrRow, blobTotalsRow, blockedRows] = await Promise.all([
+    db.first<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM pr_scopes WHERE owner_id = ?1",
+      [ownerId],
+    ),
+    db.first<{
+      total_blobs: number;
+      total_bytes: number;
+      unreferenced_blobs: number;
+    }>(
+      `SELECT
+         COUNT(*) AS total_blobs,
+         COALESCE(SUM(b.file_size), 0) AS total_bytes,
+         COALESCE(SUM(CASE
+           WHEN b.gc_blocked = 0
+             AND NOT EXISTS (SELECT 1 FROM store_paths sp WHERE sp.blob_id = b.id)
+           THEN 1 ELSE 0
+         END), 0) AS unreferenced_blobs
+       FROM blobs b
+       WHERE b.owner_id = ?1`,
+      [ownerId],
+    ),
+    db.all<BlockedBlob>(
+      `SELECT ghcr_package, manifest_digest, COALESCE(gc_block_reason, '') AS reason
+       FROM blobs
+       WHERE owner_id = ?1 AND gc_blocked = 1
+       ORDER BY ghcr_package, manifest_digest`,
+      [ownerId],
+    ),
+  ]);
 
   return {
     activePrs: activePrRow?.count ?? 0,
     totalBlobs: blobTotalsRow?.total_blobs ?? 0,
     totalBytes: blobTotalsRow?.total_bytes ?? 0,
-    unreferencedBlobs: unrefRow?.count ?? 0,
+    unreferencedBlobs: blobTotalsRow?.unreferenced_blobs ?? 0,
     blockedBlobs: blockedRows,
   };
 }
@@ -608,7 +622,24 @@ export async function listStorePaths(
   query: string | null = null,
   sort: StorePathSort = "accessed",
 ): Promise<StorePathSummary[]> {
-  const likePattern = query ? `%${query}%` : null;
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+  if (ownerId !== null) {
+    params.push(ownerId);
+    conditions.push(`b.owner_id = ?${params.length}`);
+  }
+  if (scope !== null) {
+    params.push(scope);
+    conditions.push(`sp.scope = ?${params.length}`);
+  }
+  if (query) {
+    params.push(`%${query}%`);
+    conditions.push(`sp.store_path LIKE ?${params.length}`);
+  }
+  params.push(limit);
+
+  const whereClause =
+    conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const orderBy =
     sort === "size"
       ? "b.file_size DESC, sp.id DESC"
@@ -618,12 +649,10 @@ export async function listStorePaths(
     `SELECT b.owner_id, sp.scope, sp.store_path, b.file_size, sp.last_accessed_at
      FROM store_paths sp
      JOIN blobs b ON b.id = sp.blob_id
-     WHERE (?1 IS NULL OR b.owner_id = ?1)
-       AND (?2 IS NULL OR sp.scope = ?2)
-       AND (?3 IS NULL OR sp.store_path LIKE ?3)
+     ${whereClause}
      ORDER BY ${orderBy}
-     LIMIT ?4`,
-    [ownerId, scope, likePattern, limit],
+     LIMIT ?${params.length}`,
+    params,
   );
 }
 
