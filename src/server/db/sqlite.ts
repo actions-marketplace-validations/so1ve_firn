@@ -26,29 +26,33 @@ export function openNodeSqlite(dbPath: string): CloseableSqlDatabase {
   }
 
   return {
-    first<T>(sql: string, params: readonly SqlParam[] = []): Promise<T | null> {
+    async first<T>(
+      sql: string,
+      params: readonly SqlParam[] = [],
+    ): Promise<T | null> {
       const row = db.prepare(sql).get(...params);
 
-      return Promise.resolve((row as T | undefined) ?? null);
+      return (row as T | undefined) ?? null;
     },
 
-    all<T>(sql: string, params: readonly SqlParam[] = []): Promise<T[]> {
-      const rows = db.prepare(sql).all(...params);
-
-      return Promise.resolve(rows as T[]);
+    async all<T>(sql: string, params: readonly SqlParam[] = []): Promise<T[]> {
+      return db.prepare(sql).all(...params) as T[];
     },
 
-    run(sql: string, params: readonly SqlParam[] = []): Promise<SqlRunResult> {
+    async run(
+      sql: string,
+      params: readonly SqlParam[] = [],
+    ): Promise<SqlRunResult> {
       const result = db.prepare(sql).run(...params);
 
-      return Promise.resolve({ changes: Number(result.changes) });
+      return { changes: Number(result.changes) };
     },
 
-    batch(
+    async batch(
       statements: readonly SqlStatement[],
     ): Promise<readonly SqlRunResult[]> {
       if (statements.length === 0) {
-        return Promise.resolve([]);
+        return [];
       }
 
       db.exec("BEGIN IMMEDIATE;");
@@ -62,13 +66,11 @@ export function openNodeSqlite(dbPath: string): CloseableSqlDatabase {
         }
         db.exec("COMMIT;");
 
-        return Promise.resolve(results);
+        return results;
       } catch (error) {
         db.exec("ROLLBACK;");
 
-        return Promise.reject(
-          error instanceof Error ? error : new Error(String(error)),
-        );
+        throw error;
       }
     },
 

@@ -4,20 +4,11 @@ import { BatchCond, openHttp } from "@libsql/hrana-client";
 import type { CloseableSqlDatabase } from "./sqlite.ts";
 import type { SqlParam, SqlRunResult, SqlStatement } from "./types.ts";
 
-export function normalizeLibsqlHttpUrl(rawUrl: string): string {
-  const trimmed = rawUrl.trim();
-  if (trimmed.startsWith("libsql://")) {
-    return `https://${trimmed.slice("libsql://".length)}`;
-  }
-  if (trimmed.startsWith("wss://")) {
-    return `https://${trimmed.slice("wss://".length)}`;
-  }
-  if (trimmed.startsWith("ws://")) {
-    return `http://${trimmed.slice("ws://".length)}`;
-  }
-
-  return trimmed;
-}
+export const normalizeLibsqlHttpUrl = (rawUrl: string): string =>
+  rawUrl
+    .trim()
+    .replace(/^libsql:\/\//, "https://")
+    .replace(/^ws(s?):\/\//, "http$1://");
 
 function rowToObject<T>(
   columnNames: readonly (string | undefined)[],

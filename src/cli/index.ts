@@ -679,15 +679,11 @@ const cli = Clerc.create({
   })
   .on("serve", async (ctx) => {
     const running = await startNodeServer({
-      ...(ctx.flags.host === undefined ? {} : { host: ctx.flags.host }),
-      ...(ctx.flags.port === undefined ? {} : { port: ctx.flags.port }),
-      ...(ctx.flags.db === undefined ? {} : { dbPath: ctx.flags.db }),
-      ...(ctx.flags.libsqlUrl === undefined
-        ? {}
-        : { libsqlUrl: ctx.flags.libsqlUrl }),
-      ...(ctx.flags.gcInterval === undefined
-        ? {}
-        : { gcIntervalMinutes: ctx.flags.gcInterval }),
+      host: ctx.flags.host,
+      port: ctx.flags.port,
+      dbPath: ctx.flags.db,
+      libsqlUrl: ctx.flags.libsqlUrl,
+      gcIntervalMinutes: ctx.flags.gcInterval,
     });
 
     function shutdown(signal: string) {
@@ -722,10 +718,8 @@ const cli = Clerc.create({
   )
   .on("migrate", async (ctx) => {
     const { applied, storage } = await runDatabaseMigrations({
-      ...(ctx.flags.db === undefined ? {} : { dbPath: ctx.flags.db }),
-      ...(ctx.flags.libsqlUrl === undefined
-        ? {}
-        : { libsqlUrl: ctx.flags.libsqlUrl }),
+      dbPath: ctx.flags.db,
+      libsqlUrl: ctx.flags.libsqlUrl,
     });
 
     if (applied.length === 0) {

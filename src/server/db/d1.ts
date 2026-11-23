@@ -5,51 +5,40 @@ import type {
   SqlStatement,
 } from "./types.ts";
 
-export const d1Adapter = (db: D1Database): SqlDatabase => ({
-  async first<T>(
-    sql: string,
-    params: readonly SqlParam[] = [],
-  ): Promise<T | null> {
-    const stmt =
-      params.length > 0 ? db.prepare(sql).bind(...params) : db.prepare(sql);
+export function d1Adapter(db: D1Database): SqlDatabase {
+  const prepare = (sql: string, params: readonly SqlParam[] = []) =>
+    params.length > 0 ? db.prepare(sql).bind(...params) : db.prepare(sql);
 
-    return stmt.first<T>();
-  },
+  return {
+    first: <T>(sql: string, params?: readonly SqlParam[]) =>
+      prepare(sql, params).first<T>(),
 
-  async all<T>(sql: string, params: readonly SqlParam[] = []): Promise<T[]> {
-    const stmt =
-      params.length > 0 ? db.prepare(sql).bind(...params) : db.prepare(sql);
-    const result = await stmt.all<T>();
+    async all<T>(sql: string, params?: readonly SqlParam[]): Promise<T[]> {
+      const result = await prepare(sql, params).all<T>();
 
-    return result.results;
-  },
+      return result.results;
+    },
 
-  async run(
-    sql: string,
-    params: readonly SqlParam[] = [],
-  ): Promise<SqlRunResult> {
-    const stmt =
-      params.length > 0 ? db.prepare(sql).bind(...params) : db.prepare(sql);
-    const result = await stmt.run();
+    async run(
+      sql: string,
+      params?: readonly SqlParam[],
+    ): Promise<SqlRunResult> {
+      const result = await prepare(sql, params).run();
 
-    return { changes: result.meta.changes ?? 0 };
-  },
+      return { changes: result.meta.changes ?? 0 };
+    },
 
-  async batch(
-    statements: readonly SqlStatement[],
-  ): Promise<readonly SqlRunResult[]> {
-    if (statements.length === 0) {
-      return [];
-    }
-    const prepared = statements.map((statement) => {
-      const params = statement.params ?? [];
+    async batch(
+      statements: readonly SqlStatement[],
+    ): Promise<readonly SqlRunResult[]> {
+      if (statements.length === 0) {
+        return [];
+      }
+      const results = await db.batch(
+        statements.map((s) => prepare(s.sql, s.params)),
+      );
 
-      return params.length > 0
-        ? db.prepare(statement.sql).bind(...params)
-        : db.prepare(statement.sql);
-    });
-    const results = await db.batch(prepared);
-
-    return results.map((result) => ({ changes: result.meta.changes ?? 0 }));
-  },
-});
+      return results.map((result) => ({ changes: result.meta.changes ?? 0 }));
+    },
+  };
+}

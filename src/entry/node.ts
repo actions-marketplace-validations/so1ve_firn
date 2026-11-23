@@ -30,12 +30,12 @@ const FILE_BACKED_ENV_KEYS = [
 ] as const;
 
 export interface NodeServerOptions {
-  host?: string;
-  port?: number;
-  dbPath?: string;
-  libsqlUrl?: string;
-  libsqlAuthToken?: string;
-  gcIntervalMinutes?: number;
+  host?: string | undefined;
+  port?: number | undefined;
+  dbPath?: string | undefined;
+  libsqlUrl?: string | undefined;
+  libsqlAuthToken?: string | undefined;
+  gcIntervalMinutes?: number | undefined;
   env?: Record<string, string | undefined>;
 }
 
@@ -63,9 +63,9 @@ export function resolveEnvWithFiles(
 }
 
 export function openConfiguredDatabase(options: {
-  dbPath?: string;
-  libsqlUrl?: string;
-  libsqlAuthToken?: string;
+  dbPath?: string | undefined;
+  libsqlUrl?: string | undefined;
+  libsqlAuthToken?: string | undefined;
   env?: Record<string, string | undefined>;
 }): { db: CloseableSqlDatabase; storage: string } {
   const env = resolveEnvWithFiles(options.env ?? process.env);
@@ -89,9 +89,9 @@ export function openConfiguredDatabase(options: {
 }
 
 export async function runDatabaseMigrations(options: {
-  dbPath?: string;
-  libsqlUrl?: string;
-  libsqlAuthToken?: string;
+  dbPath?: string | undefined;
+  libsqlUrl?: string | undefined;
+  libsqlAuthToken?: string | undefined;
   env?: Record<string, string | undefined>;
 }): Promise<{ applied: string[]; storage: string }> {
   const { db, storage } = openConfiguredDatabase(options);
@@ -109,32 +109,16 @@ export async function startNodeServer(
 ): Promise<RunningNodeServer> {
   const env = resolveEnvWithFiles(options.env ?? process.env);
   const host = options.host ?? env.HOST?.trim() ?? "127.0.0.1";
-  const portRaw = options.port ?? Number.parseInt(env.PORT ?? "8787", 10);
-  if (!Number.isFinite(portRaw) || portRaw < 0 || portRaw > 65_535) {
-    throw new Error(`invalid port '${String(portRaw)}'`);
-  }
-
-  const gcIntervalRaw =
+  const port = options.port ?? Number.parseInt(env.PORT ?? "8787", 10);
+  const gcIntervalMinutes =
     options.gcIntervalMinutes ??
     Number.parseInt(env.GC_INTERVAL_MINUTES ?? "30", 10);
-  if (!Number.isFinite(gcIntervalRaw) || gcIntervalRaw < 0) {
-    throw new Error(`invalid GC interval '${String(gcIntervalRaw)}'`);
-  }
 
   const config = await loadConfig(env, {
     defaultMaxGcSubrequests: 10_000,
   });
 
-  const { db, storage } = openConfiguredDatabase({
-    ...(options.dbPath === undefined ? {} : { dbPath: options.dbPath }),
-    ...(options.libsqlUrl === undefined
-      ? {}
-      : { libsqlUrl: options.libsqlUrl }),
-    ...(options.libsqlAuthToken === undefined
-      ? {}
-      : { libsqlAuthToken: options.libsqlAuthToken }),
-    env,
-  });
+  const { db, storage } = openConfiguredDatabase({ ...options, env });
 
   const applied = await applyMigrations(db);
   if (applied.length > 0) {
@@ -151,9 +135,9 @@ export async function startNodeServer(
   }
   app.route("/", coreApp);
 
-  let gcTimer: ReturnType<typeof setInterval> | null = null;
+  let gcTimer: ReturnType<typeof setInterval> | undefined;
   let gcInFlight = false;
-  if (gcIntervalRaw > 0) {
+  if (gcIntervalMinutes > 0) {
     gcTimer = setInterval(
       () => {
         if (gcInFlight) {
@@ -173,7 +157,7 @@ export async function startNodeServer(
             gcInFlight = false;
           });
       },
-      gcIntervalRaw * 60 * 1000,
+      gcIntervalMinutes * 60 * 1000,
     );
     gcTimer.unref();
   }
@@ -184,7 +168,7 @@ export async function startNodeServer(
         {
           fetch: app.fetch,
           hostname: host,
-          port: portRaw,
+          port,
         },
         () => resolve(instance),
       );
@@ -194,7 +178,7 @@ export async function startNodeServer(
 
   const address = server.address();
   const actualPort =
-    typeof address === "object" && address !== null ? address.port : portRaw;
+    typeof address === "object" && address ? address.port : port;
 
   console.log(
     JSON.stringify({
@@ -202,7 +186,7 @@ export async function startNodeServer(
       host,
       port: actualPort,
       storage,
-      gc_interval_minutes: gcIntervalRaw,
+      gc_interval_minutes: gcIntervalMinutes,
       public_base_url: config.publicBaseUrl,
     }),
   );
@@ -211,10 +195,7 @@ export async function startNodeServer(
     host,
     port: actualPort,
     close(): Promise<void> {
-      if (gcTimer) {
-        clearInterval(gcTimer);
-        gcTimer = null;
-      }
+      clearInterval(gcTimer);
 
       return new Promise((resolve, reject) => {
         server.close((error) => {

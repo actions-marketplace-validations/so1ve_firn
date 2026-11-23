@@ -36,11 +36,8 @@ function parsePrScope(
   scope: string,
 ): { owner: string; repo: string; number: string } | null {
   const match = /^pr:([^:]+):([^:]+):(\d+)$/.exec(scope);
-  if (!match?.[1] || !match[2] || !match[3]) {
-    return null;
-  }
 
-  return { owner: match[1], repo: match[2], number: match[3] };
+  return match ? { owner: match[1], repo: match[2], number: match[3] } : null;
 }
 
 function narinfoHref(scope: string, storeHash: string): string {
