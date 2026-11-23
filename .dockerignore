@@ -1,0 +1,11 @@
+.git
+.github
+.wrangler
+.devenv
+.direnv
+.dev.vars
+.dev.vars.*
+wrangler.prod.jsonc
+node_modules
+*.db
+*.db-*

@@ -136,14 +136,16 @@ state in Turso/libSQL instead of a local SQLite file. Set `--gc-interval 0` (or
 
 ### Docker
 
+Prebuilt multi-arch (`linux/amd64`, `linux/arm64`) images are published to
+`ghcr.io/so1ve/firn`:
+
 ```sh
-docker build -t firn .
 docker run -d --name firn -p 8787:8787 -v firn-data:/data \
   -e PUBLIC_BASE_URL=https://cache.example.com \
   -e OWNERS_JSON='[...]' \
   -e MAIN_SIGNING_KEY="$(cat main.key)" \
   -e PR_SIGNING_KEY="$(cat pr.key)" \
-  firn
+  ghcr.io/so1ve/firn:latest
 ```
 
 ### NixOS Module
