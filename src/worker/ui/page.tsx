@@ -187,42 +187,40 @@ export function DashboardPage({ data }: { data: DashboardData }) {
             <div id="admin-notice" class="notice" role="status" hidden />
 
             <section aria-labelledby="usage-heading">
-              <div class="sec-head">
-                <div class="tabs-row">
-                  <h2 id="usage-heading">Substituter</h2>
-                  <div
-                    class="tabs"
-                    role="tablist"
-                    aria-label="Configuration format"
+              <div class="sec-head usage-head">
+                <h2 id="usage-heading">Substituter</h2>
+                <div
+                  class="tabs"
+                  role="tablist"
+                  aria-label="Configuration format"
+                >
+                  <button
+                    type="button"
+                    class="tab-btn"
+                    role="tab"
+                    aria-selected="true"
+                    data-tab="nix"
                   >
-                    <button
-                      type="button"
-                      class="tab-btn"
-                      role="tab"
-                      aria-selected="true"
-                      data-tab="nix"
-                    >
-                      nix.conf
-                    </button>
-                    <button
-                      type="button"
-                      class="tab-btn"
-                      role="tab"
-                      aria-selected="false"
-                      data-tab="gha"
-                    >
-                      GitHub Actions
-                    </button>
-                    <button
-                      type="button"
-                      class="tab-btn"
-                      role="tab"
-                      aria-selected="false"
-                      data-tab="pr"
-                    >
-                      PR Overlay
-                    </button>
-                  </div>
+                    nix.conf
+                  </button>
+                  <button
+                    type="button"
+                    class="tab-btn"
+                    role="tab"
+                    aria-selected="false"
+                    data-tab="gha"
+                  >
+                    GitHub Actions
+                  </button>
+                  <button
+                    type="button"
+                    class="tab-btn"
+                    role="tab"
+                    aria-selected="false"
+                    data-tab="pr"
+                  >
+                    PR Overlay
+                  </button>
                 </div>
                 <button
                   type="button"
