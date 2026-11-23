@@ -362,16 +362,33 @@ export class GitHubAppClient {
     return data.token;
   }
 
-  async #findVersionId(
-    versionsUrl: string,
+  #packageUrl(owner: string, ownerType: OwnerType, pkg: string): string {
+    const scopeSegment = ownerType === "org" ? "orgs" : "users";
+
+    return `${this.#apiUrl}/${scopeSegment}/${owner}/packages/container/${pkg}`;
+  }
+
+  public async listGhcrPackageVersions(
+    owner: string,
+    ownerType: OwnerType,
     token: string,
-    manifestDigest: string,
-  ): Promise<number | null> {
-    for (let page = 1; ; page++) {
+    pkg: string,
+    maxPages: number,
+  ): Promise<{
+    versions: Map<string, number>;
+    requestsUsed: number;
+    complete: boolean;
+  }> {
+    const versionsUrl = `${this.#packageUrl(owner, ownerType, pkg)}/versions`;
+    const versions = new Map<string, number>();
+    let requestsUsed = 0;
+
+    for (let page = 1; page <= maxPages; page++) {
       const url = `${versionsUrl}?per_page=100&page=${page}`;
       const response = await this.#request("GET", url, token);
+      requestsUsed += 1;
       if (response.status === 404) {
-        return null;
+        return { versions, requestsUsed, complete: true };
       }
       if (!response.ok) {
         const body = await response.text().catch(() => "");
@@ -381,20 +398,16 @@ export class GitHubAppClient {
         );
       }
 
-      const versions = await response.json<
-        {
-          id: number;
-          name: string;
-        }[]
-      >();
-      const found = versions.find((v) => v.name === manifestDigest);
-      if (found) {
-        return found.id;
+      const items = await response.json<{ id: number; name: string }[]>();
+      for (const item of items) {
+        versions.set(item.name, item.id);
       }
-      if (versions.length < 100) {
-        return null;
+      if (items.length < 100) {
+        return { versions, requestsUsed, complete: true };
       }
     }
+
+    return { versions, requestsUsed, complete: false };
   }
 
   async #deletePackage(
@@ -419,34 +432,22 @@ export class GitHubAppClient {
     );
   }
 
-  public async deleteGhcrPackageVersion(
+  public async deleteGhcrPackageVersionById(
     owner: string,
     ownerType: OwnerType,
-    installationId: number,
+    token: string,
     pkg: string,
+    versionId: number,
     manifestDigest: string,
-  ): Promise<DeleteOutcome> {
-    const token = await this.installationToken(installationId);
-    const scopeSegment = ownerType === "org" ? "orgs" : "users";
-    const packageUrl = `${this.#apiUrl}/${scopeSegment}/${owner}/packages/container/${pkg}`;
-    const versionsUrl = `${packageUrl}/versions`;
-
-    const versionId = await this.#findVersionId(
-      versionsUrl,
-      token,
-      manifestDigest,
-    );
-    if (versionId === null) {
-      return { kind: "not_found" };
-    }
-
-    const deleteUrl = `${versionsUrl}/${versionId}`;
+  ): Promise<{ outcome: DeleteOutcome; requestsUsed: number }> {
+    const packageUrl = this.#packageUrl(owner, ownerType, pkg);
+    const deleteUrl = `${packageUrl}/versions/${versionId}`;
     const response = await this.#request("DELETE", deleteUrl, token);
     if (response.status === 404) {
-      return { kind: "not_found" };
+      return { outcome: { kind: "not_found" }, requestsUsed: 1 };
     }
     if (response.ok) {
-      return { kind: "deleted" };
+      return { outcome: { kind: "deleted" }, requestsUsed: 1 };
     }
 
     const body = await response.text().catch(() => "");
@@ -461,10 +462,13 @@ export class GitHubAppClient {
         }),
       );
 
-      return this.#deletePackage(packageUrl, token);
+      return {
+        outcome: await this.#deletePackage(packageUrl, token),
+        requestsUsed: 2,
+      };
     }
     if (isDownloadThresholdRejection(response.status, body)) {
-      return { kind: "blocked", reason: body };
+      return { outcome: { kind: "blocked", reason: body }, requestsUsed: 1 };
     }
 
     throw new Error(
