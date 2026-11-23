@@ -35,10 +35,18 @@ import {
   listUnreferencedBlobs,
 } from "./db.ts";
 
+interface MockVersion {
+  id: number;
+  name: string;
+  created_at?: string;
+  updated_at?: string;
+  metadata?: { container?: { tags?: string[] } };
+}
+
 interface MockStore {
   blobs: Map<string, Uint8Array>;
   manifests: Map<string, Uint8Array>;
-  versions: Map<string, { id: number; name: string }[]>;
+  versions: Map<string, MockVersion[]>;
   blockedPackages: Set<string>;
   deletedVersions: number[];
   deletedPackages: string[];
@@ -1268,5 +1276,99 @@ describe("firn worker", () => {
     await expect(
       listUnreferencedBlobs(d1Adapter(env.DB), "so1ve"),
     ).resolves.toEqual([]);
+  });
+
+  it("sweeps aged untracked nar-* GHCR orphans while protecting live, recent, and non-Firn versions", async () => {
+    const mainJwt = await signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/orphan-test",
+      ref: "refs/heads/main",
+      event_name: "push",
+    });
+
+    await uploadAndCommit(
+      mainJwt,
+      "so1ve/orphan-test-cache",
+      "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-live-pkg",
+      "live-pkg-nar",
+    );
+
+    const oldIso = new Date((unixNow() - 2 * 60 * 60) * 1000).toISOString();
+    const recentIso = new Date((unixNow() - 5 * 60) * 1000).toISOString();
+    const existing = store.versions.get("so1ve/orphan-test-cache") ?? [];
+    existing[0].updated_at = oldIso;
+    existing[0].metadata = { container: { tags: ["nar-live"] } };
+
+    // 3 aged Firn orphans, 1 recent in-flight nar-* version, and 1 non-Firn tagged image.
+    existing.push(
+      {
+        id: 2001,
+        name: `sha256:${"1".repeat(64)}`,
+        updated_at: oldIso,
+        metadata: { container: { tags: ["nar-orphan-1"] } },
+      },
+      {
+        id: 2002,
+        name: `sha256:${"2".repeat(64)}`,
+        updated_at: oldIso,
+        metadata: { container: { tags: ["nar-orphan-2"] } },
+      },
+      {
+        id: 2003,
+        name: `sha256:${"3".repeat(64)}`,
+        updated_at: oldIso,
+        metadata: { container: { tags: ["nar-orphan-3"] } },
+      },
+      {
+        id: 2004,
+        name: `sha256:${"4".repeat(64)}`,
+        updated_at: recentIso,
+        metadata: { container: { tags: ["nar-inflight"] } },
+      },
+      {
+        id: 2005,
+        name: `sha256:${"5".repeat(64)}`,
+        updated_at: oldIso,
+        metadata: { container: { tags: ["latest"] } },
+      },
+    );
+    store.versions.set("so1ve/orphan-test-cache", existing);
+
+    // Budget = 5: 1 install token + 1 list page + 2 deletes (reserving 2 for last-version fallback).
+    testEnv.GC_MAX_SUBREQUESTS = "5";
+    const round1 = await (
+      await callWorker(
+        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
+          method: "POST",
+          headers: { Authorization: "Bearer admin-secret-token" },
+        }),
+      )
+    ).json<GcReport>();
+
+    expect(round1.blobs_deleted).toBe(2);
+    expect(round1.blobs_skipped).toBe(1);
+    expect(round1.blob_errors).toBe(0);
+
+    // Round 2 drains the remaining orphan and leaves live, recent, and non-Firn versions intact.
+    const round2 = await (
+      await callWorker(
+        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
+          method: "POST",
+          headers: { Authorization: "Bearer admin-secret-token" },
+        }),
+      )
+    ).json<GcReport>();
+
+    expect(round2.blobs_deleted).toBe(1);
+    expect(round2.blobs_skipped).toBe(0);
+    expect(round2.blob_errors).toBe(0);
+
+    expect(store.deletedVersions).toEqual([2001, 2002, 2003]);
+    expect(
+      (store.versions.get("so1ve/orphan-test-cache") ?? []).map((v) => v.id),
+    ).toEqual([1, 2004, 2005]);
   });
 });

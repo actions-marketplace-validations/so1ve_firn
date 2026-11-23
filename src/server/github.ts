@@ -23,6 +23,13 @@ export type DeleteOutcome =
   | { kind: "not_found" }
   | { kind: "blocked"; reason: string };
 
+export interface GhcrPackageVersion {
+  id: number;
+  name: string;
+  updatedAt: number | null;
+  tags: string[];
+}
+
 interface JwkKey extends JsonWebKey {
   kid?: string;
   alg?: string;
@@ -363,6 +370,54 @@ export class GitHubAppClient {
     return `${this.#apiUrl}/${scopeSegment}/${owner}/packages/container/${pkg}`;
   }
 
+  public async listGhcrPackageVersionsPage(
+    owner: string,
+    ownerType: OwnerType,
+    token: string,
+    pkg: string,
+    page: number,
+  ): Promise<{ versions: GhcrPackageVersion[]; notFound: boolean }> {
+    const url = `${this.#packageUrl(owner, ownerType, pkg)}/versions?per_page=100&page=${page}`;
+    const response = await this.#request("GET", url, token);
+    if (response.status === 404) {
+      return { versions: [], notFound: true };
+    }
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+
+      throw new Error(
+        `failed to list GHCR versions at ${url} (${response.status}): ${body}`,
+      );
+    }
+
+    const items = await response.json<
+      {
+        id: number;
+        name: string;
+        created_at?: string;
+        updated_at?: string;
+        metadata?: { container?: { tags?: string[] } };
+      }[]
+    >();
+
+    return {
+      notFound: false,
+      versions: items.map((item) => {
+        const ts = item.updated_at ?? item.created_at;
+        const parsedMs = ts ? Date.parse(ts) : Number.NaN;
+
+        return {
+          id: item.id,
+          name: item.name,
+          updatedAt: Number.isFinite(parsedMs)
+            ? Math.floor(parsedMs / 1000)
+            : null,
+          tags: item.metadata?.container?.tags ?? [],
+        };
+      }),
+    };
+  }
+
   public async listGhcrPackageVersions(
     owner: string,
     ownerType: OwnerType,
@@ -375,32 +430,28 @@ export class GitHubAppClient {
     requestsUsed: number;
     complete: boolean;
   }> {
-    const versionsUrl = `${this.#packageUrl(owner, ownerType, pkg)}/versions`;
     const versions = new Map<string, number>();
     const remaining = targetDigests ? new Set(targetDigests) : null;
     let requestsUsed = 0;
 
     for (let page = 1; page <= maxPages; page++) {
-      const url = `${versionsUrl}?per_page=100&page=${page}`;
-      const response = await this.#request("GET", url, token);
+      const result = await this.listGhcrPackageVersionsPage(
+        owner,
+        ownerType,
+        token,
+        pkg,
+        page,
+      );
       requestsUsed += 1;
-      if (response.status === 404) {
+      if (result.notFound) {
         return { versions, requestsUsed, complete: true };
       }
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
 
-        throw new Error(
-          `failed to list GHCR versions at ${url} (${response.status}): ${body}`,
-        );
-      }
-
-      const items = await response.json<{ id: number; name: string }[]>();
-      for (const item of items) {
+      for (const item of result.versions) {
         versions.set(item.name, item.id);
         remaining?.delete(item.name);
       }
-      if (items.length < 100) {
+      if (result.versions.length < 100) {
         return { versions, requestsUsed, complete: true };
       }
       if (remaining?.size === 0) {

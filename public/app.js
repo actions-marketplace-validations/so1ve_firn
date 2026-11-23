@@ -564,7 +564,7 @@
   }
 
   // Admin GC buttons
-  const MAX_UI_GC_ROUNDS = 50;
+  const MAX_UI_GC_ROUNDS = 200;
   const dryRunBtn = document.querySelector("#gc-dry-run-btn");
   const gcBtn = document.querySelector("#gc-run-btn");
 

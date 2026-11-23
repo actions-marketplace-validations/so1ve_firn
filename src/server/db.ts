@@ -452,6 +452,34 @@ export async function listUnreferencedBlobs(
   return rows.map(mapBlobRow);
 }
 
+export async function listKnownManifestsByPackage(
+  db: SqlDatabase,
+  ownerId: string,
+): Promise<Map<string, Set<string>>> {
+  const rows = await db.all<{
+    ghcr_package: string;
+    manifest_digest: string;
+  }>(
+    `SELECT ghcr_package, manifest_digest
+     FROM blobs
+     WHERE owner_id = ?1
+     ORDER BY ghcr_package`,
+    [ownerId],
+  );
+
+  const byPackage = new Map<string, Set<string>>();
+  for (const row of rows) {
+    let manifests = byPackage.get(row.ghcr_package);
+    if (!manifests) {
+      manifests = new Set<string>();
+      byPackage.set(row.ghcr_package, manifests);
+    }
+    manifests.add(row.manifest_digest);
+  }
+
+  return byPackage;
+}
+
 export async function cacheBlobVersionIds(
   db: SqlDatabase,
   ownerId: string,
