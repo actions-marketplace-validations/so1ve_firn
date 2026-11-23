@@ -5,7 +5,7 @@
   "packageManager": "pnpm@12.11.2",
   "author": "Ray <i@mk1.io> (https://github.com/so1ve/)",
   "type": "module",
-  "description": "Stateful Nix binary cache backed by GHCR and Cloudflare Workers + D1",
+  "description": "Nix binary cache index for GHCR on Cloudflare Workers + D1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/so1ve/firn.git"

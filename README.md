@@ -2,11 +2,12 @@
 
 # Firn
 
-Stateful Nix binary cache backed by GHCR, running on Cloudflare Workers (Hono +
-D1) with a built-in web dashboard and Node.js CLI.
+Nix binary cache index for GHCR, running on Cloudflare Workers (Hono + D1) with
+a built-in web dashboard and Node.js CLI.
 
-Metadata, signing, and GC state live in Cloudflare D1, while compressed NAR
-blobs transfer directly between clients and GHCR via 302 CDN redirects.
+Firn never stores or proxies NAR blobs itself: Cloudflare D1 holds store path
+metadata, signatures, PR overlays, and GC state, while compressed NAR files live
+in GHCR and transfer directly between clients and GHCR via 302 CDN redirects.
 
 ## Live Example
 

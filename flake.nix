@@ -1,5 +1,5 @@
 {
-  description = "Stateful Nix binary cache backed by GHCR and Cloudflare Workers + D1";
+  description = "Nix binary cache index for GHCR on Cloudflare Workers + D1";
 
   nixConfig = {
     extra-substituters = [ "https://cache.so1ve.dev" ];
