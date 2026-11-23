@@ -1,5 +1,5 @@
 {
-  description = "Nix binary cache index for GHCR on Cloudflare Workers + D1";
+  description = "Nix binary cache index for GHCR with PR overlays, closure-safe GC, and OIDC CI uploads";
 
   nixConfig = {
     extra-substituters = [ "https://cache.so1ve.dev" ];

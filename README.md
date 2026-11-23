@@ -2,15 +2,11 @@
 
 # Firn
 
-Nix binary cache index for GHCR, built on Hono with a web dashboard and Node.js
-CLI. Runs on Cloudflare Workers (D1), self-hosted Node.js (`firn serve` with
-built-in SQLite, Docker, or NixOS), or any Web-standard serverless runtime via
-Turso/libSQL.
+Nix binary cache index for GHCR with isolated PR overlays, closure-safe GC, and
+keyless GitHub Actions OIDC uploads.
 
-Firn never stores or proxies NAR blobs itself: SQLite / D1 / libSQL holds store
-path metadata, signatures, PR overlays, and GC state, while compressed NAR files
-live in GHCR and transfer directly between clients and GHCR via 302 CDN
-redirects.
+Firn stores only store path metadata and signatures; compressed NAR blobs are stored
+in GHCR and transfer directly via 302 redirects.
 
 ## Live Example
 
@@ -268,8 +264,8 @@ Use `--owner <name>` only if the same token is shared across multiple owners,
 
 ## Remote Administration
 
-When `ADMIN_TOKEN` is configured on the Worker, the local CLI can inspect and
-manage the remote D1 cache from any machine (pass `--server` / `--token` or set
+When `ADMIN_TOKEN` is configured on the server, the local CLI can inspect and
+manage the remote cache from any machine (pass `--server` / `--token` or set
 `FIRN_SERVER` / `FIRN_ADMIN_TOKEN`; add `--json` to any read/GC command for
 machine-readable output):
 
