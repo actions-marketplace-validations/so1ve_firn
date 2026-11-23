@@ -38,6 +38,7 @@ export interface LoadedConfig {
   mainKey: SigningKeyPair;
   prKey: SigningKeyPair;
   githubApp: LoadedGitHubApp | null;
+  githubPackagesToken: string | null;
   webhookSecret: string | null;
   gc: {
     prTtlDays: number;
@@ -108,6 +109,7 @@ export interface ServerRuntimeEnv {
   MAIN_SIGNING_KEY?: string;
   PR_SIGNING_KEY?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
+  GITHUB_PACKAGES_TOKEN?: string;
   GITHUB_WEBHOOK_SECRET?: string;
   MANUAL_TOKENS_JSON?: string;
   ADMIN_TOKEN?: string;
@@ -210,6 +212,7 @@ export async function loadConfig(
     mainKey,
     prKey,
     githubApp,
+    githubPackagesToken: env.GITHUB_PACKAGES_TOKEN?.trim() || null,
     webhookSecret: env.GITHUB_WEBHOOK_SECRET?.trim() || null,
     gc: {
       prTtlDays: parseOptionalPositiveInt(env.GC_PR_TTL_DAYS, 3),

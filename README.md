@@ -70,8 +70,8 @@ Environment variables (`vars`):
 - `GC_MAX_SUBREQUESTS`: max GitHub API subrequests per GC invocation (default
   `40` for Cloudflare Workers Free plan; increase on Workers Paid plans, e.g.
   `800`).
-- `GITHUB_APP_ID`: numeric GitHub App ID (optional; required for GHCR GC
-  deletion and local manual pushes).
+- `GITHUB_APP_ID`: numeric GitHub App ID (optional; required for local manual
+  pushes and private GHCR package pull fallback).
 - `OWNERS_JSON`: JSON array of allowed GitHub users/orgs, for example:
 
 ```json
@@ -89,7 +89,10 @@ Environment variables (`vars`):
 ]
 ```
 
-> If you set up a GitHub App for GC and webhooks, grant **Packages: Read &
+> For GHCR GC deletion, set `GITHUB_PACKAGES_TOKEN` to a GitHub **classic** PAT
+> with `read:packages` and `delete:packages` scopes (GitHub Packages REST API
+> rejects custom GitHub App installation tokens on package deletion). If you
+> also set up a GitHub App for webhooks and local push, grant **Packages: Read &
 > write** and **Pull requests: Read-only**, subscribe to `Pull request` events,
 > and point the webhook URL to `https://cache.example.com/api/v1/webhooks/github`.
 
@@ -102,6 +105,7 @@ deploys the Worker):
 ```sh
 pnpm exec wrangler secret put MAIN_SIGNING_KEY < main.key
 pnpm exec wrangler secret put PR_SIGNING_KEY < pr.key
+pnpm exec wrangler secret put GITHUB_PACKAGES_TOKEN
 pnpm exec wrangler secret put GITHUB_APP_PRIVATE_KEY < github-app.pem
 pnpm exec wrangler secret put GITHUB_WEBHOOK_SECRET
 pnpm exec wrangler secret put MANUAL_TOKENS_JSON
@@ -115,8 +119,9 @@ Self-hosted Firn uses Node 24's built-in `node:sqlite` (zero native builds),
 applies migrations automatically on startup, schedules periodic GC in-process
 (with no 50-subrequest Worker cap), and supports `*_FILE` variants for all
 secret environment variables (`MAIN_SIGNING_KEY_FILE`, `PR_SIGNING_KEY_FILE`,
-`GITHUB_APP_PRIVATE_KEY_FILE`, `GITHUB_WEBHOOK_SECRET_FILE`,
-`MANUAL_TOKENS_JSON_FILE`, `ADMIN_TOKEN_FILE`, `LIBSQL_AUTH_TOKEN_FILE`).
+`GITHUB_PACKAGES_TOKEN_FILE`, `GITHUB_APP_PRIVATE_KEY_FILE`,
+`GITHUB_WEBHOOK_SECRET_FILE`, `MANUAL_TOKENS_JSON_FILE`, `ADMIN_TOKEN_FILE`,
+`LIBSQL_AUTH_TOKEN_FILE`).
 
 ### CLI (`firn serve`)
 

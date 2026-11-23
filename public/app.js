@@ -618,6 +618,7 @@
         blobs_blocked: 0,
         blobs_skipped: 0,
         blob_errors: 0,
+        last_error: "",
       };
       let rounds = 0;
 
@@ -637,6 +638,9 @@
         totals.blobs_blocked += r.blobs_blocked;
         totals.blobs_skipped = r.blobs_skipped;
         totals.blob_errors += r.blob_errors;
+        if (r.last_error) {
+          totals.last_error = r.last_error;
+        }
 
         const madeProgress =
           r.blobs_deleted > 0 ||
@@ -667,7 +671,9 @@
             totals.main_paths_removed
           }, blobs_deleted=${totals.blobs_deleted}, blocked=${
             totals.blobs_blocked
-          }, skipped=${totals.blobs_skipped}, errors=${totals.blob_errors}`,
+          }, skipped=${totals.blobs_skipped}, errors=${totals.blob_errors}${
+            totals.last_error ? ` — ${totals.last_error}` : ""
+          }`,
         totals.blob_errors > 0 ? "error" : "ok",
       );
       await Promise.all([refreshPaths(), refreshOverview()]);

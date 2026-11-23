@@ -5,8 +5,11 @@
 MAIN_SIGNING_KEY="cache.example.com-1:..."
 PR_SIGNING_KEY="cache.example.com-pr-1:..."
 
-# Optional: GitHub App private key PEM (PKCS#1 or PKCS#8) for GHCR GC and local push
+# Optional: GitHub App private key PEM (PKCS#1 or PKCS#8) for local push and private package pull
 # GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+
+# Optional: Classic PAT (read:packages + delete:packages) for GHCR GC deletion
+# GITHUB_PACKAGES_TOKEN="ghp_..."
 
 # Optional: GitHub webhook HMAC-SHA256 secret for POST /api/v1/webhooks/github
 # GITHUB_WEBHOOK_SECRET=""

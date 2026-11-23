@@ -236,6 +236,17 @@ const createMockFetch =
       /^\/users\/([^/]+)\/packages\/container\/([^/]+)\/versions\/(\d+)$/.exec(
         url.pathname,
       );
+    if (versionDeleteMatch && method === "GET") {
+      const key = `${versionDeleteMatch[1]}/${versionDeleteMatch[2]}`;
+      const vid = Number.parseInt(versionDeleteMatch[3], 10);
+      const found = (store.versions.get(key) ?? []).find(
+        (item) => item.id === vid,
+      );
+
+      return found
+        ? Response.json(found)
+        : Response.json({ message: "Not Found" }, { status: 404 });
+    }
     if (versionDeleteMatch && method === "DELETE") {
       const key = `${versionDeleteMatch[1]}/${versionDeleteMatch[2]}`;
       const vid = Number.parseInt(versionDeleteMatch[3], 10);
@@ -1370,5 +1381,165 @@ describe("firn worker", () => {
     expect(
       (store.versions.get("so1ve/orphan-test-cache") ?? []).map((v) => v.id),
     ).toEqual([1, 2004, 2005]);
+  });
+
+  it("reports an error instead of faking deletion when GHCR masks DELETE permission denial as 404", async () => {
+    const baseFetch = createMockFetch(rsa.jwk, store);
+    let deleteCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const reqUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const method = (init?.method ?? "GET").toUpperCase();
+        const url = new URL(reqUrl);
+        if (method === "DELETE" && url.pathname.includes("/versions/")) {
+          deleteCalls += 1;
+
+          return Response.json(
+            { message: "Package not found." },
+            { status: 404 },
+          );
+        }
+
+        return baseFetch(input, init);
+      },
+    );
+
+    const mainJwt = await signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/denied",
+      ref: "refs/heads/main",
+      event_name: "push",
+    });
+
+    await uploadAndCommit(
+      mainJwt,
+      "so1ve/denied-cache",
+      "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-live",
+      "live-nar",
+    );
+
+    const oldIso = new Date((unixNow() - 2 * 60 * 60) * 1000).toISOString();
+    const existing = store.versions.get("so1ve/denied-cache") ?? [];
+    existing.push(
+      {
+        id: 3001,
+        name: `sha256:${"7".repeat(64)}`,
+        updated_at: oldIso,
+        metadata: { container: { tags: ["nar-orphan-a"] } },
+      },
+      {
+        id: 3002,
+        name: `sha256:${"8".repeat(64)}`,
+        updated_at: oldIso,
+        metadata: { container: { tags: ["nar-orphan-b"] } },
+      },
+    );
+    store.versions.set("so1ve/denied-cache", existing);
+
+    const report = await (
+      await callWorker(
+        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
+          method: "POST",
+          headers: { Authorization: "Bearer admin-secret-token" },
+        }),
+      )
+    ).json<GcReport>();
+
+    expect(report.blobs_deleted).toBe(0);
+    expect(report.blob_errors).toBe(1);
+    expect(report.last_error).toContain("404");
+    expect(report.last_error).toContain("Package not found.");
+    // Fails fast on the first 404 instead of retrying every remaining orphan in the package.
+    expect(deleteCalls).toBe(1);
+  });
+
+  it("uses GITHUB_PACKAGES_TOKEN directly for GC without a GitHub App installation", async () => {
+    const baseFetch = createMockFetch(rsa.jwk, store);
+    let installTokenCalls = 0;
+    const authHeaders: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const reqUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const url = new URL(reqUrl);
+        if (/^\/app\/installations\/\d+\/access_tokens$/.test(url.pathname)) {
+          installTokenCalls += 1;
+        }
+        if (url.pathname.includes("/packages/container/")) {
+          const headers = new Headers(
+            init?.headers ?? (input instanceof Request ? input.headers : {}),
+          );
+          authHeaders.push(headers.get("authorization") ?? "");
+        }
+
+        return baseFetch(input, init);
+      },
+    );
+
+    const mainJwt = await signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/pat-gc",
+      ref: "refs/heads/main",
+      event_name: "push",
+    });
+
+    await uploadAndCommit(
+      mainJwt,
+      "so1ve/pat-gc-cache",
+      "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-kept",
+      "kept-nar",
+    );
+
+    const oldIso = new Date((unixNow() - 2 * 60 * 60) * 1000).toISOString();
+    const existing = store.versions.get("so1ve/pat-gc-cache") ?? [];
+    existing.push({
+      id: 4001,
+      name: `sha256:${"9".repeat(64)}`,
+      updated_at: oldIso,
+      metadata: { container: { tags: ["nar-orphan-pat"] } },
+    });
+    store.versions.set("so1ve/pat-gc-cache", existing);
+
+    // Disable GitHub App and supply GITHUB_PACKAGES_TOKEN instead.
+    testEnv.GITHUB_APP_ID = "";
+    testEnv.GITHUB_APP_PRIVATE_KEY = "";
+    testEnv.GITHUB_PACKAGES_TOKEN = "ghp_test_classic_pat";
+
+    const report = await (
+      await callWorker(
+        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
+          method: "POST",
+          headers: { Authorization: "Bearer admin-secret-token" },
+        }),
+      )
+    ).json<GcReport>();
+
+    expect(report.blobs_deleted).toBe(1);
+    expect(report.blob_errors).toBe(0);
+    expect(installTokenCalls).toBe(0);
+    expect(authHeaders).toEqual([
+      "Bearer ghp_test_classic_pat",
+      "Bearer ghp_test_classic_pat",
+    ]);
+    expect(store.deletedVersions).toEqual([4001]);
   });
 });

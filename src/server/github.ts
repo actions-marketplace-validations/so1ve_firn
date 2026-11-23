@@ -20,7 +20,7 @@ export interface OidcClaims {
 
 export type DeleteOutcome =
   | { kind: "deleted" }
-  | { kind: "not_found" }
+  | { kind: "not_found"; reason: string }
   | { kind: "blocked"; reason: string };
 
 export interface GhcrPackageVersion {
@@ -288,6 +288,21 @@ function isDownloadThresholdRejection(status: number, body: string): boolean {
   );
 }
 
+const githubApiRequest = async (
+  method: string,
+  url: string,
+  bearer: string,
+): Promise<Response> =>
+  fetch(url, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${bearer}`,
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "firn",
+    },
+  });
+
 export class GitHubAppClient {
   readonly #appId: number;
   readonly #privateKeyPem: string;
@@ -332,26 +347,10 @@ export class GitHubAppClient {
     return `${signingInput}.${base64UrlEncode(sig)}`;
   }
 
-  async #request(
-    method: string,
-    url: string,
-    bearer: string,
-  ): Promise<Response> {
-    return fetch(url, {
-      method,
-      headers: {
-        "Authorization": `Bearer ${bearer}`,
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "firn",
-      },
-    });
-  }
-
   public async installationToken(installationId: number): Promise<string> {
     const jwt = await this.#issueAppJwt();
     const url = `${this.#apiUrl}/app/installations/${installationId}/access_tokens`;
-    const response = await this.#request("POST", url, jwt);
+    const response = await githubApiRequest("POST", url, jwt);
     if (!response.ok) {
       const body = await response.text().catch(() => "");
 
@@ -362,6 +361,14 @@ export class GitHubAppClient {
     const data = await response.json<{ token: string }>();
 
     return data.token;
+  }
+}
+
+export class GitHubPackagesClient {
+  readonly #apiUrl: string;
+
+  constructor(apiUrl: string) {
+    this.#apiUrl = apiUrl.replace(/\/+$/, "");
   }
 
   #packageUrl(owner: string, ownerType: OwnerType, pkg: string): string {
@@ -378,7 +385,7 @@ export class GitHubAppClient {
     page: number,
   ): Promise<{ versions: GhcrPackageVersion[]; notFound: boolean }> {
     const url = `${this.#packageUrl(owner, ownerType, pkg)}/versions?per_page=100&page=${page}`;
-    const response = await this.#request("GET", url, token);
+    const response = await githubApiRequest("GET", url, token);
     if (response.status === 404) {
       return { versions: [], notFound: true };
     }
@@ -462,13 +469,37 @@ export class GitHubAppClient {
     return { versions, requestsUsed, complete: false };
   }
 
+  public async ghcrPackageVersionExists(
+    owner: string,
+    ownerType: OwnerType,
+    token: string,
+    pkg: string,
+    versionId: number,
+  ): Promise<boolean> {
+    const url = `${this.#packageUrl(owner, ownerType, pkg)}/versions/${versionId}`;
+    const response = await githubApiRequest("GET", url, token);
+    if (response.status === 404) {
+      return false;
+    }
+    if (response.ok) {
+      return true;
+    }
+    const body = await response.text().catch(() => "");
+
+    throw new Error(
+      `failed to check GHCR version ${versionId} for ${owner}/${pkg} (${response.status}): ${body}`,
+    );
+  }
+
   async #deletePackage(
     packageUrl: string,
     token: string,
   ): Promise<DeleteOutcome> {
-    const response = await this.#request("DELETE", packageUrl, token);
+    const response = await githubApiRequest("DELETE", packageUrl, token);
     if (response.status === 404) {
-      return { kind: "not_found" };
+      const body = await response.text().catch(() => "");
+
+      return { kind: "not_found", reason: body };
     }
     if (response.ok) {
       return { kind: "deleted" };
@@ -494,9 +525,11 @@ export class GitHubAppClient {
   ): Promise<{ outcome: DeleteOutcome; requestsUsed: number }> {
     const packageUrl = this.#packageUrl(owner, ownerType, pkg);
     const deleteUrl = `${packageUrl}/versions/${versionId}`;
-    const response = await this.#request("DELETE", deleteUrl, token);
+    const response = await githubApiRequest("DELETE", deleteUrl, token);
     if (response.status === 404) {
-      return { outcome: { kind: "not_found" }, requestsUsed: 1 };
+      const body = await response.text().catch(() => "");
+
+      return { outcome: { kind: "not_found", reason: body }, requestsUsed: 1 };
     }
     if (response.ok) {
       return { outcome: { kind: "deleted" }, requestsUsed: 1 };

@@ -93,4 +93,5 @@ export interface GcReport {
   blobs_blocked: number;
   blobs_skipped: number;
   blob_errors: number;
+  last_error?: string;
 }

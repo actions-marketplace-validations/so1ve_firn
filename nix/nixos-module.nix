@@ -14,6 +14,9 @@ let
       cfg.githubAppPrivateKeyFile != null
     ) "github-app-private-key:${cfg.githubAppPrivateKeyFile}")
     (lib.optionalString (
+      cfg.githubPackagesTokenFile != null
+    ) "github-packages-token:${cfg.githubPackagesTokenFile}")
+    (lib.optionalString (
       cfg.githubWebhookSecretFile != null
     ) "github-webhook-secret:${cfg.githubWebhookSecretFile}")
     (lib.optionalString (cfg.manualTokensFile != null) "manual-tokens:${cfg.manualTokensFile}")
@@ -111,6 +114,12 @@ in
       description = "Optional path to GitHub App PEM private key file.";
     };
 
+    githubPackagesTokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Optional path to GitHub classic PAT file (read:packages + delete:packages) for GHCR GC deletion.";
+    };
+
     githubWebhookSecretFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -176,6 +185,9 @@ in
       }
       // lib.optionalAttrs (cfg.githubAppPrivateKeyFile != null) {
         GITHUB_APP_PRIVATE_KEY_FILE = "/run/credentials/firn.service/github-app-private-key";
+      }
+      // lib.optionalAttrs (cfg.githubPackagesTokenFile != null) {
+        GITHUB_PACKAGES_TOKEN_FILE = "/run/credentials/firn.service/github-packages-token";
       }
       // lib.optionalAttrs (cfg.githubWebhookSecretFile != null) {
         GITHUB_WEBHOOK_SECRET_FILE = "/run/credentials/firn.service/github-webhook-secret";

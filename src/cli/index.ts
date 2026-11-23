@@ -641,6 +641,9 @@ const cli = Clerc.create({
         report.blobs_blocked += step.blobs_blocked;
         report.blobs_skipped = step.blobs_skipped;
         report.blob_errors += step.blob_errors;
+        if (step.last_error) {
+          report.last_error = step.last_error;
+        }
 
         const madeProgress =
           step.blobs_deleted > 0 ||
@@ -704,6 +707,9 @@ const cli = Clerc.create({
             ? out.boldRed(String(report.blob_errors))
             : out.green("0"),
         ],
+        ...(report.last_error
+          ? [["Last error", out.red(report.last_error)] as [string, string]]
+          : []),
       ]),
     );
   })
