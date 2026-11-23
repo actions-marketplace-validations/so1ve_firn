@@ -10,7 +10,8 @@ import {
 } from "../../shared/nix-format.ts";
 import { OciClient } from "../../shared/oci.ts";
 import type { PublicKeysResponse } from "../../shared/protocol.ts";
-import type { LoadedConfig, WorkerRuntimeEnv } from "../config.ts";
+import type { AppBindings } from "../app.ts";
+import type { LoadedConfig } from "../config.ts";
 import { ghcrRepository } from "../config.ts";
 import {
   MAIN_SCOPE,
@@ -21,13 +22,6 @@ import {
   touchAccessedThrottled,
 } from "../db.ts";
 import { acquirePullToken } from "../ghcr.ts";
-
-export interface AppBindings {
-  Bindings: WorkerRuntimeEnv;
-  Variables: {
-    config: LoadedConfig;
-  };
-}
 
 const textResponse = (body: string, contentType: string): Response =>
   new Response(body, {
@@ -61,14 +55,13 @@ async function serveNarInfo(
     return c.text("invalid store hash", 404);
   }
 
-  const stored = await getNarInfo(c.env.DB, scope, storeHash);
+  const db = c.get("db");
+  const stored = await getNarInfo(db, scope, storeHash);
   if (!stored) {
     return c.text("narinfo not found", 404);
   }
 
-  c.executionCtx.waitUntil(
-    touchAccessedThrottled(c.env.DB, stored.id, unixNow()),
-  );
+  c.get("waitUntil")(touchAccessedThrottled(db, stored.id, unixNow()));
 
   return textResponse(
     renderNarInfo(storedToNarInfo(stored)),
@@ -91,7 +84,7 @@ async function serveNar(
     return c.text("invalid nar digest", 404);
   }
 
-  const blob = await getBlobForDownload(c.env.DB, scope, digestHex);
+  const blob = await getBlobForDownload(c.get("db"), scope, digestHex);
   if (!blob) {
     return c.text("nar blob not found", 404);
   }

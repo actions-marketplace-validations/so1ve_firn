@@ -1,8 +1,8 @@
+import type { Context } from "hono";
 import { Hono } from "hono";
 
-import type { WorkerRuntimeEnv } from "./config.ts";
-import { loadConfig } from "./config.ts";
-import { runGc } from "./gc.ts";
+import type { LoadedConfig } from "./config.ts";
+import type { SqlDatabase } from "./db/types.ts";
 import {
   handleAdminDeletePaths,
   handleAdminDeletePr,
@@ -11,7 +11,6 @@ import {
   handleAdminListPrs,
   handleAdminStatus,
 } from "./routes/admin.ts";
-import type { AppBindings } from "./routes/cache.ts";
 import {
   handleMainCacheInfo,
   handleMainNar,
@@ -24,27 +23,49 @@ import {
 import { handleDashboard, handlePublicPaths } from "./routes/ui.ts";
 import { handleUploadCommit, handleUploadPlan } from "./routes/upload.ts";
 import { handleWebhook } from "./routes/webhook.ts";
-import { FAVICON_SVG } from "./ui/logo.ts";
 
-function createApp(): Hono<AppBindings> {
+export interface AppContext {
+  db: SqlDatabase;
+  config: LoadedConfig;
+  waitUntil?: (promise: Promise<unknown>) => void;
+}
+
+export interface AppBindings {
+  Variables: {
+    db: SqlDatabase;
+    config: LoadedConfig;
+    waitUntil: (promise: Promise<unknown>) => void;
+  };
+}
+
+export type AppContextResolver = (
+  c: Context<AppBindings>,
+) => AppContext | Promise<AppContext>;
+
+function defaultWaitUntil(promise: Promise<unknown>): void {
+  void promise.catch((error: unknown) => {
+    console.error(
+      JSON.stringify({
+        message: "background task failed",
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  });
+}
+
+export function createApp(
+  resolveContext: AppContextResolver,
+): Hono<AppBindings> {
   const app = new Hono<AppBindings>();
 
   app.get("/healthz", (c) => c.text("ok\n"));
   app.get("/nix-cache-info", () => handleMainCacheInfo());
-  app.get(
-    "/favicon.svg",
-    () =>
-      new Response(FAVICON_SVG, {
-        headers: {
-          "Content-Type": "image/svg+xml; charset=utf-8",
-          "Cache-Control": "public, max-age=86400",
-        },
-      }),
-  );
 
   app.use("*", async (c, next) => {
-    const config = await loadConfig(c.env);
-    c.set("config", config);
+    const resolved = await resolveContext(c);
+    c.set("db", resolved.db);
+    c.set("config", resolved.config);
+    c.set("waitUntil", resolved.waitUntil ?? defaultWaitUntil);
     await next();
   });
 
@@ -85,28 +106,3 @@ function createApp(): Hono<AppBindings> {
 
   return app;
 }
-
-const app = createApp();
-
-export default {
-  fetch(
-    request: Request,
-    env: WorkerRuntimeEnv,
-    ctx: ExecutionContext,
-  ): Response | Promise<Response> {
-    return app.fetch(request, env, ctx);
-  },
-
-  async scheduled(
-    _controller: ScheduledController,
-    env: WorkerRuntimeEnv,
-    ctx: ExecutionContext,
-  ): Promise<void> {
-    ctx.waitUntil(
-      (async () => {
-        const config = await loadConfig(env);
-        await runGc(env.DB, config, false);
-      })(),
-    );
-  },
-} satisfies ExportedHandler<WorkerRuntimeEnv>;

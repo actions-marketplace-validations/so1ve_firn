@@ -1,8 +1,8 @@
 import type { Context } from "hono";
 
+import type { AppBindings } from "../app.ts";
 import { deletePrScope } from "../db.ts";
 import { verifyWebhookSignature } from "../github.ts";
-import type { AppBindings } from "./cache.ts";
 
 interface PullRequestWebhook {
   action: string;
@@ -63,7 +63,7 @@ export async function handleWebhook(
   const owner = config.ownersByGithubId.get(payload.repository.owner.id);
   if (owner) {
     const removed = await deletePrScope(
-      c.env.DB,
+      c.get("db"),
       owner.name,
       payload.repository.name,
       payload.pull_request.number,

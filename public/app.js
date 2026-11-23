@@ -1,32 +1,35 @@
-export const CLIENT_SCRIPT = `
 (() => {
   const TOKEN_KEY = "firn_admin_token";
 
-  function getToken() {
-    return sessionStorage.getItem(TOKEN_KEY) || "";
-  }
+  const getToken = () => sessionStorage.getItem(TOKEN_KEY) || "";
 
   function setAdminUi(unlocked) {
-    document.querySelectorAll(".admin-only").forEach((el) => {
+    for (const el of document.querySelectorAll(".admin-only")) {
       el.hidden = !unlocked;
-    });
-    const toggleBtn = document.getElementById("admin-toggle-btn");
-    const loginForm = document.getElementById("admin-login-form");
-    const activeControls = document.getElementById("admin-active-controls");
+    }
+    const toggleBtn = document.querySelector("#admin-toggle-btn");
+    const loginForm = document.querySelector("#admin-login-form");
+    const activeControls = document.querySelector("#admin-active-controls");
     if (toggleBtn) {
       toggleBtn.hidden = unlocked;
       toggleBtn.setAttribute("aria-expanded", "false");
     }
-    if (loginForm) loginForm.hidden = true;
-    if (activeControls) activeControls.hidden = !unlocked;
+    if (loginForm) {
+      loginForm.hidden = true;
+    }
+    if (activeControls) {
+      activeControls.hidden = !unlocked;
+    }
   }
 
   function showNotice(id, text, kind) {
-    const el = document.getElementById(id);
-    if (!el) return;
+    const el = document.querySelector(`#${id}`);
+    if (!el) {
+      return;
+    }
     el.hidden = !text;
     el.textContent = text;
-    el.className = "notice" + (kind ? " " + kind : "");
+    el.className = `notice${kind ? ` ${kind}` : ""}`;
   }
 
   function formatBytes(bytes) {
@@ -37,28 +40,42 @@ export const CLIENT_SCRIPT = `
       v /= 1024;
       i += 1;
     }
-    return i === 0 ? bytes + " B" : v.toFixed(2) + " " + units[i];
+
+    return i === 0 ? `${bytes} B` : `${v.toFixed(2)} ${units[i]}`;
   }
 
   function formatAge(ts) {
     const delta = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-    if (delta < 60) return delta + "s ago";
-    if (delta < 3600) return Math.floor(delta / 60) + "m ago";
-    if (delta < 86400) return Math.floor(delta / 3600) + "h ago";
-    return Math.floor(delta / 86400) + "d ago";
+    if (delta < 60) {
+      return `${delta}s ago`;
+    }
+    if (delta < 3600) {
+      return `${Math.floor(delta / 60)}m ago`;
+    }
+    if (delta < 86_400) {
+      return `${Math.floor(delta / 3600)}h ago`;
+    }
+
+    return `${Math.floor(delta / 86_400)}d ago`;
   }
 
   function splitStorePath(storePath) {
-    const base = storePath.startsWith("/nix/store/") ? storePath.slice(11) : storePath;
+    const base = storePath.startsWith("/nix/store/")
+      ? storePath.slice(11)
+      : storePath;
     if (base.length > 33 && base[32] === "-") {
       return { hash: base.slice(0, 32), name: base.slice(33) };
     }
+
     return { hash: "", name: base };
   }
 
   function parsePrScope(scope) {
-    const match = /^pr:([^:]+):([^:]+):(\\d+)$/.exec(scope);
-    if (!match) return null;
+    const match = /^pr:([^:]+):([^:]+):(\d+)$/.exec(scope);
+    if (!match) {
+      return null;
+    }
+
     return { owner: match[1], repo: match[2], number: match[3] };
   }
 
@@ -68,13 +85,16 @@ export const CLIENT_SCRIPT = `
     a.target = "_blank";
     a.rel = "noopener noreferrer";
     a.textContent = text;
+
     return a;
   }
 
   // Copy buttons
   document.addEventListener("click", async (event) => {
     const btn = event.target.closest("[data-copy]");
-    if (!btn) return;
+    if (!btn) {
+      return;
+    }
     const text = btn.getAttribute("data-copy") || "";
     try {
       await navigator.clipboard.writeText(text);
@@ -89,14 +109,14 @@ export const CLIENT_SCRIPT = `
   });
 
   // Snippet tabs + shared Copy button
-  const snippetCopyBtn = document.getElementById("snippet-copy-btn");
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
+  const snippetCopyBtn = document.querySelector("#snippet-copy-btn");
+  for (const btn of document.querySelectorAll(".tab-btn")) {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-tab");
-      document.querySelectorAll(".tab-btn").forEach((other) => {
+      for (const other of document.querySelectorAll(".tab-btn")) {
         other.setAttribute("aria-selected", String(other === btn));
-      });
-      document.querySelectorAll("[data-panel]").forEach((panel) => {
+      }
+      for (const panel of document.querySelectorAll("[data-panel]")) {
         const active = panel.getAttribute("data-panel") === target;
         panel.hidden = !active;
         if (active && snippetCopyBtn) {
@@ -105,26 +125,28 @@ export const CLIENT_SCRIPT = `
             panel.getAttribute("data-snippet") || "",
           );
         }
-      });
+      }
     });
-  });
+  }
 
   // Live store paths filter & sort
-  const searchInput = document.getElementById("filter-q");
-  const ownerSelect = document.getElementById("filter-owner");
-  const scopeSelect = document.getElementById("filter-scope");
-  const limitSelect = document.getElementById("filter-limit");
-  const deleteMatchingBtn = document.getElementById("delete-matching-btn");
+  const searchInput = document.querySelector("#filter-q");
+  const ownerSelect = document.querySelector("#filter-owner");
+  const scopeSelect = document.querySelector("#filter-scope");
+  const limitSelect = document.querySelector("#filter-limit");
+  const deleteMatchingBtn = document.querySelector("#delete-matching-btn");
   const sortButtons = document.querySelectorAll(".sort-btn[data-sort]");
-  const pathsBody = document.getElementById("paths-body");
-  const pathsStatus = document.getElementById("paths-status");
+  const pathsBody = document.querySelector("#paths-body");
+  const pathsStatus = document.querySelector("#paths-status");
 
   let currentSort = "accessed";
   let filterTimer = null;
   let activeController = null;
 
   function syncDeleteMatchingState() {
-    if (!deleteMatchingBtn) return;
+    if (!deleteMatchingBtn) {
+      return;
+    }
     const hasFilter = Boolean(
       searchInput.value.trim() || ownerSelect.value || scopeSelect.value,
     );
@@ -138,8 +160,13 @@ export const CLIENT_SCRIPT = `
   async function refreshOverview() {
     try {
       const res = await fetch("/", { cache: "no-store" });
-      if (!res.ok) return;
-      const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+      if (!res.ok) {
+        return;
+      }
+      const doc = new DOMParser().parseFromString(
+        await res.text(),
+        "text/html",
+      );
       const unlocked = Boolean(getToken());
       for (const selector of [
         ".summary-line",
@@ -153,11 +180,11 @@ export const CLIENT_SCRIPT = `
         }
       }
       if (unlocked) {
-        document.querySelectorAll(".admin-only").forEach((el) => {
+        for (const el of document.querySelectorAll(".admin-only")) {
           el.hidden = false;
-        });
+        }
       }
-      const nextScope = doc.getElementById("filter-scope");
+      const nextScope = doc.querySelector("#filter-scope");
       if (scopeSelect && nextScope) {
         const selected = scopeSelect.value;
         scopeSelect.replaceChildren(...nextScope.children);
@@ -173,24 +200,36 @@ export const CLIENT_SCRIPT = `
   }
 
   async function refreshPaths() {
-    if (activeController) activeController.abort();
+    if (activeController) {
+      activeController.abort();
+    }
     activeController = new AbortController();
 
     const params = new URLSearchParams();
-    if (searchInput.value.trim()) params.set("q", searchInput.value.trim());
-    if (ownerSelect.value) params.set("owner", ownerSelect.value);
-    if (scopeSelect.value) params.set("scope", scopeSelect.value);
-    if (limitSelect.value) params.set("limit", limitSelect.value);
+    if (searchInput.value.trim()) {
+      params.set("q", searchInput.value.trim());
+    }
+    if (ownerSelect.value) {
+      params.set("owner", ownerSelect.value);
+    }
+    if (scopeSelect.value) {
+      params.set("scope", scopeSelect.value);
+    }
+    if (limitSelect.value) {
+      params.set("limit", limitSelect.value);
+    }
     params.set("sort", currentSort);
 
     pathsStatus.textContent = "loading…";
     showNotice("paths-error", "", "");
 
     try {
-      const res = await fetch("/api/v1/public/paths?" + params.toString(), {
+      const res = await fetch(`/api/v1/public/paths?${params.toString()}`, {
         signal: activeController.signal,
       });
-      if (!res.ok) throw new Error("Failed to load paths (" + res.status + ")");
+      if (!res.ok) {
+        throw new Error(`Failed to load paths (${res.status})`);
+      }
       const items = await res.json();
 
       pathsBody.replaceChildren();
@@ -214,12 +253,12 @@ export const CLIENT_SCRIPT = `
           const link = document.createElement("a");
           link.className = "path-text mono";
           link.href = prScope
-            ? "/pr/" + encodeURIComponent(prScope.owner) + "/" + encodeURIComponent(prScope.repo) + "/" + prScope.number + "/" + parts.hash + ".narinfo"
-            : "/" + parts.hash + ".narinfo";
-          link.title = item.store_path + " (open .narinfo)";
+            ? `/pr/${encodeURIComponent(prScope.owner)}/${encodeURIComponent(prScope.repo)}/${prScope.number}/${parts.hash}.narinfo`
+            : `/${parts.hash}.narinfo`;
+          link.title = `${item.store_path} (open .narinfo)`;
           const h = document.createElement("span");
           h.className = "hash-prefix";
-          h.textContent = parts.hash.slice(0, 8) + "…-";
+          h.textContent = `${parts.hash.slice(0, 8)}…-`;
           const n = document.createElement("span");
           n.className = "pkg-name";
           n.textContent = parts.name;
@@ -238,7 +277,10 @@ export const CLIENT_SCRIPT = `
             removeBtn.className = "link-btn danger row-action admin-only";
             removeBtn.hidden = !getToken();
             removeBtn.textContent = "remove";
-            removeBtn.setAttribute("data-delete-path", item.scope + "\\t" + parts.hash);
+            removeBtn.setAttribute(
+              "data-delete-path",
+              `${item.scope}\t${parts.hash}`,
+            );
             actions.append(removeBtn);
           }
           wrap.append(link, actions);
@@ -250,12 +292,12 @@ export const CLIENT_SCRIPT = `
           label.className = "scope-label";
           label.title = item.scope;
           const dot = document.createElement("span");
-          dot.className = "dot " + (item.scope === "main" ? "main" : "pr");
+          dot.className = `dot ${item.scope === "main" ? "main" : "pr"}`;
           dot.setAttribute("aria-hidden", "true");
           let scopeNode;
           if (prScope) {
             scopeNode = extLink(
-              "https://github.com/" + encodeURIComponent(prScope.owner) + "/" + encodeURIComponent(prScope.repo) + "/pull/" + prScope.number,
+              `https://github.com/${encodeURIComponent(prScope.owner)}/${encodeURIComponent(prScope.repo)}/pull/${prScope.number}`,
               item.scope,
             );
             scopeNode.className = "scope-text";
@@ -270,7 +312,10 @@ export const CLIENT_SCRIPT = `
           const tdOwner = document.createElement("td");
           tdOwner.className = "mono muted";
           tdOwner.appendChild(
-            extLink("https://github.com/" + encodeURIComponent(item.owner_id), item.owner_id),
+            extLink(
+              `https://github.com/${encodeURIComponent(item.owner_id)}`,
+              item.owner_id,
+            ),
           );
 
           const tdSize = document.createElement("td");
@@ -286,11 +331,17 @@ export const CLIENT_SCRIPT = `
           pathsBody.appendChild(tr);
         }
       }
-      pathsStatus.textContent = items.length + " shown";
+      pathsStatus.textContent = `${items.length} shown`;
     } catch (error) {
-      if (error && error.name === "AbortError") return;
+      if (error && error.name === "AbortError") {
+        return;
+      }
       pathsStatus.textContent = "";
-      showNotice("paths-error", error instanceof Error ? error.message : String(error), "error");
+      showNotice(
+        "paths-error",
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
     }
   }
 
@@ -299,12 +350,12 @@ export const CLIENT_SCRIPT = `
     clearTimeout(filterTimer);
     filterTimer = setTimeout(refreshPaths, 180);
   });
-  [ownerSelect, scopeSelect, limitSelect].forEach((el) => {
+  for (const el of [ownerSelect, scopeSelect, limitSelect]) {
     el.addEventListener("change", () => {
       syncDeleteMatchingState();
       refreshPaths();
     });
-  });
+  }
   syncDeleteMatchingState();
 
   if (deleteMatchingBtn) {
@@ -318,34 +369,49 @@ export const CLIENT_SCRIPT = `
             deleteMatchingBtn.textContent = "Delete matching";
           }
         }, 4000);
+
         return;
       }
 
       const token = getToken();
-      if (!token) return;
+      if (!token) {
+        return;
+      }
       const params = new URLSearchParams();
-      if (searchInput.value.trim()) params.set("q", searchInput.value.trim());
-      if (ownerSelect.value) params.set("owner", ownerSelect.value);
-      if (scopeSelect.value) params.set("scope", scopeSelect.value);
+      if (searchInput.value.trim()) {
+        params.set("q", searchInput.value.trim());
+      }
+      if (ownerSelect.value) {
+        params.set("owner", ownerSelect.value);
+      }
+      if (scopeSelect.value) {
+        params.set("scope", scopeSelect.value);
+      }
 
       deleteMatchingBtn.disabled = true;
       deleteMatchingBtn.removeAttribute("data-armed");
       deleteMatchingBtn.textContent = "Deleting…";
       try {
-        const res = await fetch("/api/v1/admin/paths?" + params.toString(), {
+        const res = await fetch(`/api/v1/admin/paths?${params.toString()}`, {
           method: "DELETE",
-          headers: { Authorization: "Bearer " + token },
+          headers: { Authorization: `Bearer ${token}` },
         });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
         const data = await res.json();
         showNotice(
           "admin-notice",
-          "Removed " + data.removed + " store paths. Run GC to delete unreferenced GHCR blobs.",
+          `Removed ${data.removed} store paths. Run GC to delete unreferenced GHCR blobs.`,
           "ok",
         );
         await Promise.all([refreshPaths(), refreshOverview()]);
       } catch (error) {
-        showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
+        showNotice(
+          "admin-notice",
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
       } finally {
         deleteMatchingBtn.textContent = "Delete matching";
         syncDeleteMatchingState();
@@ -355,7 +421,9 @@ export const CLIENT_SCRIPT = `
 
   document.addEventListener("click", async (event) => {
     const btn = event.target.closest("[data-delete-path]");
-    if (!btn) return;
+    if (!btn) {
+      return;
+    }
     if (btn.getAttribute("data-armed") !== "true") {
       btn.setAttribute("data-armed", "true");
       btn.textContent = "confirm?";
@@ -365,29 +433,36 @@ export const CLIENT_SCRIPT = `
           btn.textContent = "remove";
         }
       }, 4000);
+
       return;
     }
 
     const token = getToken();
-    if (!token) return;
+    if (!token) {
+      return;
+    }
     const raw = btn.getAttribute("data-delete-path") || "";
-    const sep = raw.indexOf("\\t");
+    const sep = raw.indexOf("\t");
     const scope = raw.slice(0, sep);
     const hash = raw.slice(sep + 1);
     btn.disabled = true;
     try {
       const params = new URLSearchParams({ scope, hash });
-      const res = await fetch("/api/v1/admin/paths?" + params.toString(), {
+      const res = await fetch(`/api/v1/admin/paths?${params.toString()}`, {
         method: "DELETE",
-        headers: { Authorization: "Bearer " + token },
+        headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        throw new Error(await res.text());
+      }
       const data = await res.json();
       const row = btn.closest("tr");
-      if (row) row.remove();
+      if (row) {
+        row.remove();
+      }
       showNotice(
         "admin-notice",
-        "Removed " + data.removed + " store path. Run GC to delete unreferenced GHCR blobs.",
+        `Removed ${data.removed} store path. Run GC to delete unreferenced GHCR blobs.`,
         "ok",
       );
       refreshOverview();
@@ -395,36 +470,46 @@ export const CLIENT_SCRIPT = `
       btn.disabled = false;
       btn.removeAttribute("data-armed");
       btn.textContent = "remove";
-      showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
+      showNotice(
+        "admin-notice",
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
     }
   });
-  sortButtons.forEach((btn) => {
+  for (const btn of sortButtons) {
     btn.addEventListener("click", () => {
       const next = btn.getAttribute("data-sort");
-      if (!next || next === currentSort) return;
+      if (!next || next === currentSort) {
+        return;
+      }
       currentSort = next;
-      sortButtons.forEach((other) => {
+      for (const other of sortButtons) {
         const active = other.getAttribute("data-sort") === currentSort;
         other.classList.toggle("active", active);
         const th = other.closest("th");
-        if (th) th.setAttribute("aria-sort", active ? "descending" : "none");
-      });
+        if (th) {
+          th.setAttribute("aria-sort", active ? "descending" : "none");
+        }
+      }
       refreshPaths();
     });
-  });
+  }
 
   // Admin drawer toggle / unlock / lock
-  const toggleBtn = document.getElementById("admin-toggle-btn");
-  const loginForm = document.getElementById("admin-login-form");
-  const tokenInput = document.getElementById("admin-token-input");
-  const lockBtn = document.getElementById("admin-lock-btn");
+  const toggleBtn = document.querySelector("#admin-toggle-btn");
+  const loginForm = document.querySelector("#admin-login-form");
+  const tokenInput = document.querySelector("#admin-token-input");
+  const lockBtn = document.querySelector("#admin-lock-btn");
 
   if (toggleBtn && loginForm) {
     toggleBtn.addEventListener("click", () => {
       const opening = loginForm.hidden;
       loginForm.hidden = !opening;
       toggleBtn.setAttribute("aria-expanded", String(opening));
-      if (opening && tokenInput) tokenInput.focus();
+      if (opening && tokenInput) {
+        tokenInput.focus();
+      }
     });
   }
 
@@ -432,25 +517,40 @@ export const CLIENT_SCRIPT = `
     loginForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const token = tokenInput.value.trim();
-      if (!token) return;
+      if (!token) {
+        return;
+      }
       const submitBtn = loginForm.querySelector('button[type="submit"]');
-      if (submitBtn) submitBtn.disabled = true;
+      if (submitBtn) {
+        submitBtn.disabled = true;
+      }
       showNotice("admin-notice", "", "");
       try {
         const res = await fetch("/api/v1/admin/status", {
-          headers: { Authorization: "Bearer " + token },
+          headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) {
-          showNotice("admin-notice", "Invalid admin token (" + res.status + ")", "error");
+          showNotice(
+            "admin-notice",
+            `Invalid admin token (${res.status})`,
+            "error",
+          );
+
           return;
         }
         sessionStorage.setItem(TOKEN_KEY, token);
         tokenInput.value = "";
         setAdminUi(true);
       } catch (error) {
-        showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
+        showNotice(
+          "admin-notice",
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
       } finally {
-        if (submitBtn) submitBtn.disabled = false;
+        if (submitBtn) {
+          submitBtn.disabled = false;
+        }
       }
     });
   }
@@ -465,37 +565,49 @@ export const CLIENT_SCRIPT = `
 
   // Admin GC buttons
   const MAX_UI_GC_ROUNDS = 50;
-  const dryRunBtn = document.getElementById("gc-dry-run-btn");
-  const gcBtn = document.getElementById("gc-run-btn");
+  const dryRunBtn = document.querySelector("#gc-dry-run-btn");
+  const gcBtn = document.querySelector("#gc-run-btn");
 
   function setGcButtonsDisabled(disabled) {
-    if (dryRunBtn) dryRunBtn.disabled = disabled;
-    if (gcBtn) gcBtn.disabled = disabled;
+    if (dryRunBtn) {
+      dryRunBtn.disabled = disabled;
+    }
+    if (gcBtn) {
+      gcBtn.disabled = disabled;
+    }
   }
 
   async function triggerGc(dryRun) {
     const token = getToken();
-    if (!token) return;
+    if (!token) {
+      return;
+    }
     setGcButtonsDisabled(true);
-    showNotice("admin-notice", dryRun ? "Running dry-run GC…" : "Running GC…", "");
+    showNotice(
+      "admin-notice",
+      dryRun ? "Running dry-run GC…" : "Running GC…",
+      "",
+    );
     try {
       if (dryRun) {
         const res = await fetch("/api/v1/admin/gc?dry_run=true", {
           method: "POST",
-          headers: { Authorization: "Bearer " + token },
+          headers: { Authorization: `Bearer ${token}` },
         });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
         const r = await res.json();
         showNotice(
           "admin-notice",
-          "Dry-run GC: pr_removed=" + r.pr_paths_removed +
-            ", main_removed=" + r.main_paths_removed +
-            ", blobs_deleted=" + r.blobs_deleted +
-            ", blocked=" + r.blobs_blocked +
-            ", skipped=" + r.blobs_skipped +
-            ", errors=" + r.blob_errors,
+          `Dry-run GC: pr_removed=${r.pr_paths_removed}, main_removed=${
+            r.main_paths_removed
+          }, blobs_deleted=${r.blobs_deleted}, blocked=${
+            r.blobs_blocked
+          }, skipped=${r.blobs_skipped}, errors=${r.blob_errors}`,
           r.blob_errors > 0 ? "error" : "ok",
         );
+
         return;
       }
 
@@ -513,9 +625,11 @@ export const CLIENT_SCRIPT = `
         rounds += 1;
         const res = await fetch("/api/v1/admin/gc", {
           method: "POST",
-          headers: { Authorization: "Bearer " + token },
+          headers: { Authorization: `Bearer ${token}` },
         });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
         const r = await res.json();
         totals.pr_paths_removed += r.pr_paths_removed;
         totals.main_paths_removed += r.main_paths_removed;
@@ -529,13 +643,18 @@ export const CLIENT_SCRIPT = `
           r.blobs_blocked > 0 ||
           r.pr_paths_removed > 0 ||
           r.main_paths_removed > 0;
-        if (r.blobs_skipped === 0 || !madeProgress || rounds >= MAX_UI_GC_ROUNDS) {
+        if (
+          r.blobs_skipped === 0 ||
+          !madeProgress ||
+          rounds >= MAX_UI_GC_ROUNDS
+        ) {
           break;
         }
         showNotice(
           "admin-notice",
-          "Running GC (round " + (rounds + 1) + ")… blobs_deleted=" +
-            totals.blobs_deleted + ", remaining=" + r.blobs_skipped,
+          `Running GC (round ${rounds + 1})… blobs_deleted=${
+            totals.blobs_deleted
+          }, remaining=${r.blobs_skipped}`,
           "",
         );
         await refreshOverview();
@@ -543,30 +662,39 @@ export const CLIENT_SCRIPT = `
 
       showNotice(
         "admin-notice",
-        "GC complete" + (rounds > 1 ? " (" + rounds + " rounds)" : "") + ": " +
-          "pr_removed=" + totals.pr_paths_removed +
-          ", main_removed=" + totals.main_paths_removed +
-          ", blobs_deleted=" + totals.blobs_deleted +
-          ", blocked=" + totals.blobs_blocked +
-          ", skipped=" + totals.blobs_skipped +
-          ", errors=" + totals.blob_errors,
+        `GC complete${rounds > 1 ? ` (${rounds} rounds)` : ""}: ` +
+          `pr_removed=${totals.pr_paths_removed}, main_removed=${
+            totals.main_paths_removed
+          }, blobs_deleted=${totals.blobs_deleted}, blocked=${
+            totals.blobs_blocked
+          }, skipped=${totals.blobs_skipped}, errors=${totals.blob_errors}`,
         totals.blob_errors > 0 ? "error" : "ok",
       );
       await Promise.all([refreshPaths(), refreshOverview()]);
     } catch (error) {
-      showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
+      showNotice(
+        "admin-notice",
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
     } finally {
       setGcButtonsDisabled(false);
     }
   }
 
-  if (dryRunBtn) dryRunBtn.addEventListener("click", () => triggerGc(true));
-  if (gcBtn) gcBtn.addEventListener("click", () => triggerGc(false));
+  if (dryRunBtn) {
+    dryRunBtn.addEventListener("click", () => triggerGc(true));
+  }
+  if (gcBtn) {
+    gcBtn.addEventListener("click", () => triggerGc(false));
+  }
 
   // Admin PR delete with inline confirm
   document.addEventListener("click", async (event) => {
     const btn = event.target.closest("[data-delete-pr]");
-    if (!btn) return;
+    if (!btn) {
+      return;
+    }
     if (btn.getAttribute("data-armed") !== "true") {
       btn.setAttribute("data-armed", "true");
       btn.textContent = "confirm?";
@@ -576,23 +704,30 @@ export const CLIENT_SCRIPT = `
           btn.textContent = "remove";
         }
       }, 4000);
+
       return;
     }
 
     const token = getToken();
-    if (!token) return;
+    if (!token) {
+      return;
+    }
     const target = btn.getAttribute("data-delete-pr");
     btn.disabled = true;
     try {
-      const res = await fetch("/api/v1/admin/prs/" + target, {
+      const res = await fetch(`/api/v1/admin/prs/${target}`, {
         method: "DELETE",
-        headers: { Authorization: "Bearer " + token },
+        headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        throw new Error(await res.text());
+      }
       const data = await res.json();
       const row = btn.closest("tr");
       const tbody = row ? row.parentElement : null;
-      if (row) row.remove();
+      if (row) {
+        row.remove();
+      }
       if (tbody && tbody.children.length === 0) {
         const emptyTr = document.createElement("tr");
         const emptyTd = document.createElement("td");
@@ -604,7 +739,7 @@ export const CLIENT_SCRIPT = `
       }
       showNotice(
         "admin-notice",
-        "Removed PR overlay " + target + " (" + data.removed + " paths deleted)",
+        `Removed PR overlay ${target} (${data.removed} paths deleted)`,
         "ok",
       );
       await Promise.all([refreshPaths(), refreshOverview()]);
@@ -612,7 +747,11 @@ export const CLIENT_SCRIPT = `
       btn.disabled = false;
       btn.removeAttribute("data-armed");
       btn.textContent = "remove";
-      showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
+      showNotice(
+        "admin-notice",
+        error instanceof Error ? error.message : String(error),
+        "error",
+      );
     }
   });
 
@@ -620,4 +759,3 @@ export const CLIENT_SCRIPT = `
     setAdminUi(true);
   }
 })();
-`;

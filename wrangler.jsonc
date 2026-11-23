@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "firn",
-  "main": "src/worker/index.ts",
+  "main": "src/entry/cloudflare.ts",
   "compatibility_date": "2026-11-22",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
@@ -17,6 +17,9 @@
   },
   "triggers": {
     "crons": ["*/30 * * * *"]
+  },
+  "assets": {
+    "directory": "./public"
   },
   "d1_databases": [
     {

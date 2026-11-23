@@ -12,6 +12,7 @@ import {
 } from "clerc";
 
 import manifest from "../../package.json" with { type: "json" };
+import { runDatabaseMigrations, startNodeServer } from "../entry/node.ts";
 import { SigningKeyPair, unixNow } from "../shared/nix-format.ts";
 import type {
   AdminStatusResponse,
@@ -648,6 +649,92 @@ const cli = Clerc.create({
         ],
       ]),
     );
+  })
+  .command("serve", "Run a self-hosted Firn server (Node SQLite or libSQL)", {
+    flags: {
+      host: {
+        type: String,
+        description: "Bind address (default: HOST env or 127.0.0.1)",
+      },
+      port: {
+        type: Number,
+        description: "Bind port (default: PORT env or 8787)",
+      },
+      db: {
+        type: String,
+        description:
+          "Local SQLite database path (default: FIRN_DB_PATH env or ./firn.db)",
+      },
+      libsqlUrl: {
+        type: String,
+        description:
+          "Remote Turso/libSQL URL (overrides --db; default: LIBSQL_URL env)",
+      },
+      gcInterval: {
+        type: Number,
+        description:
+          "Periodic GC interval in minutes; 0 disables (default: GC_INTERVAL_MINUTES env or 30)",
+      },
+    },
+  })
+  .on("serve", async (ctx) => {
+    const running = await startNodeServer({
+      ...(ctx.flags.host === undefined ? {} : { host: ctx.flags.host }),
+      ...(ctx.flags.port === undefined ? {} : { port: ctx.flags.port }),
+      ...(ctx.flags.db === undefined ? {} : { dbPath: ctx.flags.db }),
+      ...(ctx.flags.libsqlUrl === undefined
+        ? {}
+        : { libsqlUrl: ctx.flags.libsqlUrl }),
+      ...(ctx.flags.gcInterval === undefined
+        ? {}
+        : { gcIntervalMinutes: ctx.flags.gcInterval }),
+    });
+
+    function shutdown(signal: string) {
+      console.log(
+        JSON.stringify({ message: "shutting down firn server", signal }),
+      );
+      void running.close().finally(() => {
+        process.exit(0);
+      });
+    }
+
+    process.once("SIGINT", () => shutdown("SIGINT"));
+    process.once("SIGTERM", () => shutdown("SIGTERM"));
+  })
+  .command(
+    "migrate",
+    "Apply SQL migrations to a SQLite or Turso/libSQL database",
+    {
+      flags: {
+        db: {
+          type: String,
+          description:
+            "Local SQLite database path (default: FIRN_DB_PATH env or ./firn.db)",
+        },
+        libsqlUrl: {
+          type: String,
+          description:
+            "Remote Turso/libSQL URL (overrides --db; default: LIBSQL_URL env)",
+        },
+      },
+    },
+  )
+  .on("migrate", async (ctx) => {
+    const { applied, storage } = await runDatabaseMigrations({
+      ...(ctx.flags.db === undefined ? {} : { dbPath: ctx.flags.db }),
+      ...(ctx.flags.libsqlUrl === undefined
+        ? {}
+        : { libsqlUrl: ctx.flags.libsqlUrl }),
+    });
+
+    if (applied.length === 0) {
+      console.log(`Database (${storage}) is already up to date.`);
+    } else {
+      console.log(
+        `Applied ${applied.length} migration(s) to ${storage}: ${applied.join(", ")}`,
+      );
+    }
   });
 
 await cli.parse();

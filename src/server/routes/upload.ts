@@ -17,6 +17,7 @@ import type {
   PlanRequest,
   PlanResponse,
 } from "../../shared/protocol.ts";
+import type { AppBindings } from "../app.ts";
 import type { LoadedConfig, LoadedOwner } from "../config.ts";
 import {
   ghcrPackageForRepo,
@@ -43,7 +44,6 @@ import {
   oidcRepoName,
   verifyOidcToken,
 } from "../github.ts";
-import type { AppBindings } from "./cache.ts";
 
 type UploadScope =
   | { kind: "main" }
@@ -335,7 +335,7 @@ export async function handleUploadPlan(
     }
 
     const scope = scopeToDbString(auth.scope);
-    const existing = await existingStoreHashes(c.env.DB, scope, hashes);
+    const existing = await existingStoreHashes(c.get("db"), scope, hashes);
     const missing = hashes.filter((hash) => !existing.has(hash));
     const repo = ghcrRepository(auth.owner.name, auth.ghcrPackage);
 
@@ -411,7 +411,7 @@ export async function handleUploadCommit(
         validateAndSign(oci, repo, pullToken, config, auth, entry, now),
       ),
     );
-    const committed = await commitEntries(c.env.DB, records);
+    const committed = await commitEntries(c.get("db"), records);
     const scope = scopeToDbString(auth.scope);
 
     console.log(

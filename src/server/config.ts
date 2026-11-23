@@ -98,10 +98,9 @@ export const isRepoAllowed = (owner: LoadedOwner, repo: string): boolean =>
 export const isMainRef = (owner: LoadedOwner, refName: string): boolean =>
   owner.mainRefs.includes(refName);
 
-export interface WorkerRuntimeEnv {
-  DB: D1Database;
-  PUBLIC_BASE_URL: string;
-  OWNERS_JSON: string;
+export interface ServerRuntimeEnv {
+  PUBLIC_BASE_URL?: string;
+  OWNERS_JSON?: string;
   GC_PR_TTL_DAYS?: string;
   GC_MAIN_LRU_DAYS?: string;
   GC_MAX_SUBREQUESTS?: string;
@@ -117,7 +116,14 @@ export interface WorkerRuntimeEnv {
   GITHUB_OIDC_ISSUER?: string;
 }
 
-export async function loadConfig(env: WorkerRuntimeEnv): Promise<LoadedConfig> {
+export interface LoadConfigOptions {
+  defaultMaxGcSubrequests?: number;
+}
+
+export async function loadConfig(
+  env: ServerRuntimeEnv,
+  options: LoadConfigOptions = {},
+): Promise<LoadedConfig> {
   const publicBaseUrl = (env.PUBLIC_BASE_URL ?? "").trim().replace(/\/+$/, "");
   if (!publicBaseUrl) {
     throw new Error("PUBLIC_BASE_URL must not be empty");
@@ -208,7 +214,10 @@ export async function loadConfig(env: WorkerRuntimeEnv): Promise<LoadedConfig> {
     gc: {
       prTtlDays: parseOptionalPositiveInt(env.GC_PR_TTL_DAYS, 3),
       mainLruDays: parseOptionalPositiveInt(env.GC_MAIN_LRU_DAYS, 15),
-      maxSubrequests: parseOptionalPositiveInt(env.GC_MAX_SUBREQUESTS, 40),
+      maxSubrequests: parseOptionalPositiveInt(
+        env.GC_MAX_SUBREQUESTS,
+        options.defaultMaxGcSubrequests ?? 40,
+      ),
     },
     adminToken: env.ADMIN_TOKEN?.trim() || null,
     ownersByName,

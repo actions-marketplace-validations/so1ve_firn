@@ -29,7 +29,11 @@
               ./package.json
               ./pnpm-lock.yaml
               ./pnpm-workspace.yaml
+              ./migrations
+              ./public
               ./src/cli
+              ./src/entry
+              ./src/server
               ./src/shared
             ];
           };
@@ -43,7 +47,7 @@
             inherit (finalAttrs) pname version src;
             fetcherVersion = 5;
             pnpmInstallFlags = [ "--prod" ];
-            hash = "sha256-BDgAwtsN3029mYLPT+wXnOCPvaQ73fh0d5e+ggt3Pow=";
+            hash = "sha256-B+8ia+512JSWKAAg3bJDRedZmSpPWc/94rQ6MPf9TXY=";
           };
 
           pnpmInstallFlags = [ "--prod" ];
@@ -60,7 +64,7 @@
             runHook preInstall
 
             mkdir -p "$out/bin" "$out/share/firn"
-            cp -r package.json src node_modules "$out/share/firn"
+            cp -r package.json src public migrations node_modules "$out/share/firn"
 
             makeWrapper ${pkgs.lib.getExe pkgs.nodejs_24} "$out/bin/firn" \
               --add-flags "$out/share/firn/src/cli/index.ts" \
@@ -121,5 +125,16 @@
       overlays.default = final: _prev: {
         firn = mkPackage final;
       };
+
+      nixosModules.default =
+        {
+          lib,
+          pkgs,
+          ...
+        }:
+        {
+          imports = [ ./nix/nixos-module.nix ];
+          services.firn.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.firn;
+        };
     };
 }

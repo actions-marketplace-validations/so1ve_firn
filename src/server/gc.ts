@@ -1,6 +1,7 @@
 import { unixNow } from "../shared/nix-format.ts";
 import type { GcReport } from "../shared/protocol.ts";
 import type { LoadedConfig } from "./config.ts";
+import type { SqlDatabase } from "./db/types.ts";
 import type { BlobRecord } from "./db.ts";
 import {
   cacheBlobVersionIds,
@@ -15,7 +16,7 @@ import { createGitHubAppClient } from "./github.ts";
 const SECONDS_PER_DAY = 24 * 60 * 60;
 
 export async function runGc(
-  db: D1Database,
+  db: SqlDatabase,
   config: LoadedConfig,
   dryRun: boolean,
 ): Promise<GcReport> {

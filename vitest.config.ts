@@ -10,7 +10,7 @@ export default defineConfig(async () => {
 
   return {
     test: {
-      include: ["src/**/*.test.ts"],
+      include: ["src/server/cloudflare.test.ts"],
     },
     plugins: [
       cloudflareTest({

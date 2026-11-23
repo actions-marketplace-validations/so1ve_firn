@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 import { encodeHex, unixNow } from "../shared/nix-format.ts";
 import type { LoadedConfig, OwnerType } from "./config.ts";
 
@@ -123,7 +125,7 @@ export async function timingSafeEqualString(
     crypto.subtle.digest("SHA-256", encoder.encode(b)),
   ]);
 
-  return crypto.subtle.timingSafeEqual(hashA, hashB);
+  return timingSafeEqual(new Uint8Array(hashA), new Uint8Array(hashB));
 }
 
 export async function constantTimeTokenMatches(

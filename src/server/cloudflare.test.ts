@@ -7,6 +7,8 @@ import {
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { CloudflareWorkerEnv } from "../entry/cloudflare.ts";
+import worker from "../entry/cloudflare.ts";
 import {
   SigningKeyPair,
   encodeHex,
@@ -24,7 +26,7 @@ import type {
   PlanResponse,
   StorePathSummary,
 } from "../shared/protocol.ts";
-import type { WorkerRuntimeEnv } from "./config.ts";
+import { d1Adapter } from "./db/d1.ts";
 import {
   MAIN_SCOPE,
   commitEntries,
@@ -32,7 +34,6 @@ import {
   getNarInfo,
   listUnreferencedBlobs,
 } from "./db.ts";
-import worker from "./index.ts";
 
 interface MockStore {
   blobs: Map<string, Uint8Array>;
@@ -285,7 +286,7 @@ describe("firn worker", () => {
   let prKey: SigningKeyPair;
   let rsa: Awaited<ReturnType<typeof generateRsaPair>>;
   let store: MockStore;
-  let testEnv: WorkerRuntimeEnv;
+  let testEnv: CloudflareWorkerEnv;
 
   async function callWorker(request: Request): Promise<Response> {
     const ctx = createExecutionContext();
@@ -824,10 +825,18 @@ describe("firn worker", () => {
     expect(delMatching.status).toBe(200);
     await expect(delMatching.json()).resolves.toEqual({ removed: 1 });
     await expect(
-      getNarInfo(env.DB, MAIN_SCOPE, "11111111111111111111111111111111"),
+      getNarInfo(
+        d1Adapter(env.DB),
+        MAIN_SCOPE,
+        "11111111111111111111111111111111",
+      ),
     ).resolves.toBeNull();
     await expect(
-      getNarInfo(env.DB, MAIN_SCOPE, "22222222222222222222222222222222"),
+      getNarInfo(
+        d1Adapter(env.DB),
+        MAIN_SCOPE,
+        "22222222222222222222222222222222",
+      ),
     ).resolves.not.toBeNull();
   });
 
@@ -836,7 +845,8 @@ describe("firn worker", () => {
     const liveHash = "22222222222222222222222222222222";
     const orphanHash = "33333333333333333333333333333333";
 
-    await commitEntries(env.DB, [
+    const db = d1Adapter(env.DB);
+    await commitEntries(db, [
       {
         ownerId: "so1ve",
         scope: MAIN_SCOPE,
@@ -893,18 +903,12 @@ describe("firn worker", () => {
       },
     ]);
 
-    await expect(evictStaleMainPaths(env.DB, 300, false)).resolves.toBe(1);
-    await expect(
-      getNarInfo(env.DB, MAIN_SCOPE, depHash),
-    ).resolves.not.toBeNull();
-    await expect(
-      getNarInfo(env.DB, MAIN_SCOPE, liveHash),
-    ).resolves.not.toBeNull();
-    await expect(
-      getNarInfo(env.DB, MAIN_SCOPE, orphanHash),
-    ).resolves.toBeNull();
+    await expect(evictStaleMainPaths(db, 300, false)).resolves.toBe(1);
+    await expect(getNarInfo(db, MAIN_SCOPE, depHash)).resolves.not.toBeNull();
+    await expect(getNarInfo(db, MAIN_SCOPE, liveHash)).resolves.not.toBeNull();
+    await expect(getNarInfo(db, MAIN_SCOPE, orphanHash)).resolves.toBeNull();
 
-    const unref = await listUnreferencedBlobs(env.DB, "so1ve");
+    const unref = await listUnreferencedBlobs(db, "so1ve");
 
     expect(unref).toHaveLength(1);
     expect(unref[0]?.blobDigest).toBe("3".repeat(64));
@@ -1261,6 +1265,8 @@ describe("firn worker", () => {
     expect(versionsListCalls).toBe(1);
     expect(round2.blobs_deleted).toBe(2);
     expect(round2.blobs_skipped).toBe(0);
-    await expect(listUnreferencedBlobs(env.DB, "so1ve")).resolves.toEqual([]);
+    await expect(
+      listUnreferencedBlobs(d1Adapter(env.DB), "so1ve"),
+    ).resolves.toEqual([]);
   });
 });

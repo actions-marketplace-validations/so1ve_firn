@@ -5,6 +5,7 @@ import type {
   AdminStatusResponse,
   OwnerStatusSummary,
 } from "../../shared/protocol.ts";
+import type { AppBindings } from "../app.ts";
 import type { StorePathSort } from "../db.ts";
 import {
   cacheStats,
@@ -16,7 +17,6 @@ import {
 } from "../db.ts";
 import { runGc } from "../gc.ts";
 import { timingSafeEqualString } from "../github.ts";
-import type { AppBindings } from "./cache.ts";
 
 async function requireAdmin(c: Context<AppBindings>): Promise<Response | null> {
   const adminToken = c.get("config").adminToken;
@@ -45,14 +45,14 @@ export async function handleAdminStatus(
   }
 
   const config = c.get("config");
-  const cache = await cacheStats(c.env.DB);
+  const cache = await cacheStats(c.get("db"));
   const sortedOwners = [...config.ownersByName.values()].sort((a, b) =>
     a.name.localeCompare(b.name),
   );
 
   const owners: OwnerStatusSummary[] = await Promise.all(
     sortedOwners.map(async (owner) => {
-      const stats = await ownerStats(c.env.DB, owner.name);
+      const stats = await ownerStats(c.get("db"), owner.name);
 
       return {
         name: owner.name,
@@ -107,7 +107,7 @@ export async function handleAdminListPaths(
     Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 500) : 50;
 
   const paths = await listStorePaths(
-    c.env.DB,
+    c.get("db"),
     owner,
     scope,
     limit,
@@ -148,7 +148,7 @@ export async function handleAdminDeletePaths(
     );
   }
 
-  const removed = await deleteStorePaths(c.env.DB, {
+  const removed = await deleteStorePaths(c.get("db"), {
     ownerId: owner,
     scope,
     storeHash: hash,
@@ -171,7 +171,7 @@ export async function handleAdminListPrs(
     return c.text(`unknown owner '${owner}'`, 400);
   }
 
-  const prs = await listPrScopes(c.env.DB, owner);
+  const prs = await listPrScopes(c.get("db"), owner);
 
   return c.json(prs);
 }
@@ -194,7 +194,7 @@ export async function handleAdminDeletePr(
     return c.text("invalid pull request number", 400);
   }
 
-  const removed = await deletePrScope(c.env.DB, owner, repo, prNumber);
+  const removed = await deletePrScope(c.get("db"), owner, repo, prNumber);
 
   return c.json({ owner, repo, pr_number: prNumber, removed });
 }
@@ -208,7 +208,7 @@ export async function handleAdminGc(
   }
 
   const dryRun = c.req.query("dry_run") === "true";
-  const report = await runGc(c.env.DB, c.get("config"), dryRun);
+  const report = await runGc(c.get("db"), c.get("config"), dryRun);
 
   return c.json(report);
 }

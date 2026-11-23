@@ -1,26 +1,26 @@
 import type { Context } from "hono";
-import { html } from "hono/html";
 
 import { unixNow } from "../../shared/nix-format.ts";
 import type { OwnerStatusSummary } from "../../shared/protocol.ts";
+import type { AppBindings } from "../app.ts";
 import type { StorePathSort } from "../db.ts";
 import { cacheStats, listPrScopes, listStorePaths, ownerStats } from "../db.ts";
-import { DashboardPage } from "../ui/page.tsx";
-import type { AppBindings } from "./cache.ts";
+import { renderDashboardPage } from "../ui/page.ts";
 
 export async function handleDashboard(
   c: Context<AppBindings>,
 ): Promise<Response> {
   const config = c.get("config");
+  const db = c.get("db");
   const sortedOwners = [...config.ownersByName.values()].sort((a, b) =>
     a.name.localeCompare(b.name),
   );
 
   const [cache, owners, prs, paths] = await Promise.all([
-    cacheStats(c.env.DB),
+    cacheStats(db),
     Promise.all(
       sortedOwners.map(async (owner): Promise<OwnerStatusSummary> => {
-        const stats = await ownerStats(c.env.DB, owner.name);
+        const stats = await ownerStats(db, owner.name);
 
         return {
           name: owner.name,
@@ -33,29 +33,26 @@ export async function handleDashboard(
         };
       }),
     ),
-    listPrScopes(c.env.DB, null),
-    listStorePaths(c.env.DB, null, null, 50),
+    listPrScopes(db, null),
+    listStorePaths(db, null, null, 50),
   ]);
 
-  return c.html(html`
-    <!doctype html>
-    ${DashboardPage({
-      data: {
-        publicBaseUrl: config.publicBaseUrl,
-        mainPublicKey: config.mainKey.publicString(),
-        prPublicKey: config.prKey.publicString(),
-        adminEnabled: config.adminToken !== null,
-        gc: config.gc,
-        mainPaths: cache.mainPaths,
-        prPaths: cache.prPaths,
-        activePrs: cache.activePrs,
-        owners,
-        prs,
-        paths,
-        now: unixNow(),
-      },
-    })}
-  `);
+  return c.html(
+    renderDashboardPage({
+      publicBaseUrl: config.publicBaseUrl,
+      mainPublicKey: config.mainKey.publicString(),
+      prPublicKey: config.prKey.publicString(),
+      adminEnabled: config.adminToken !== null,
+      gc: config.gc,
+      mainPaths: cache.mainPaths,
+      prPaths: cache.prPaths,
+      activePrs: cache.activePrs,
+      owners,
+      prs,
+      paths,
+      now: unixNow(),
+    }),
+  );
 }
 
 export async function handlePublicPaths(
@@ -77,7 +74,7 @@ export async function handlePublicPaths(
     Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
 
   const paths = await listStorePaths(
-    c.env.DB,
+    c.get("db"),
     owner,
     scope,
     limit,

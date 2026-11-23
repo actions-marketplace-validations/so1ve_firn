@@ -1,13 +1,16 @@
-<img src="assets/logo.svg" alt="Firn" width="56" height="56" />
+<img src="public/favicon.svg" alt="Firn" width="56" height="56" />
 
 # Firn
 
-Nix binary cache index for GHCR, running on Cloudflare Workers (Hono + D1) with
-a built-in web dashboard and Node.js CLI.
+Nix binary cache index for GHCR, built on Hono with a web dashboard and Node.js
+CLI. Runs on Cloudflare Workers (D1), self-hosted Node.js (`firn serve` with
+built-in SQLite, Docker, or NixOS), or any Web-standard serverless runtime via
+Turso/libSQL.
 
-Firn never stores or proxies NAR blobs itself: Cloudflare D1 holds store path
-metadata, signatures, PR overlays, and GC state, while compressed NAR files live
-in GHCR and transfer directly between clients and GHCR via 302 CDN redirects.
+Firn never stores or proxies NAR blobs itself: SQLite / D1 / libSQL holds store
+path metadata, signatures, PR overlays, and GC state, while compressed NAR files
+live in GHCR and transfer directly between clients and GHCR via 302 CDN
+redirects.
 
 ## Live Example
 
@@ -105,6 +108,84 @@ pnpm exec wrangler secret put MANUAL_TOKENS_JSON
 pnpm exec wrangler secret put ADMIN_TOKEN
 pnpm run deploy
 ```
+
+## Self-Hosting (Node.js / Docker / NixOS)
+
+Self-hosted Firn uses Node 24's built-in `node:sqlite` (zero native builds),
+applies migrations automatically on startup, schedules periodic GC in-process
+(with no 50-subrequest Worker cap), and supports `*_FILE` variants for all
+secret environment variables (`MAIN_SIGNING_KEY_FILE`, `PR_SIGNING_KEY_FILE`,
+`GITHUB_APP_PRIVATE_KEY_FILE`, `GITHUB_WEBHOOK_SECRET_FILE`,
+`MANUAL_TOKENS_JSON_FILE`, `ADMIN_TOKEN_FILE`, `LIBSQL_AUTH_TOKEN_FILE`).
+
+### CLI (`firn serve`)
+
+```sh
+export PUBLIC_BASE_URL=https://cache.example.com
+export OWNERS_JSON='[{"name":"so1ve","owner_type":"user","github_owner_id":58381667}]'
+export MAIN_SIGNING_KEY_FILE=/path/to/main.key
+export PR_SIGNING_KEY_FILE=/path/to/pr.key
+
+firn serve --host 0.0.0.0 --port 8787 --db /var/lib/firn/firn.db
+```
+
+Pass `--libsql-url` (or set `LIBSQL_URL` + `LIBSQL_AUTH_TOKEN`) to store index
+state in Turso/libSQL instead of a local SQLite file. Set `--gc-interval 0` (or
+`GC_INTERVAL_MINUTES=0`) to disable built-in periodic GC.
+
+### Docker
+
+```sh
+docker build -t firn .
+docker run -d --name firn -p 8787:8787 -v firn-data:/data \
+  -e PUBLIC_BASE_URL=https://cache.example.com \
+  -e OWNERS_JSON='[...]' \
+  -e MAIN_SIGNING_KEY="$(cat main.key)" \
+  -e PR_SIGNING_KEY="$(cat pr.key)" \
+  firn
+```
+
+### NixOS Module
+
+The flake exports `nixosModules.default` with hardened systemd `DynamicUser`
+and `LoadCredential` secret wiring:
+
+```nix
+{
+  imports = [ inputs.firn.nixosModules.default ];
+
+  services.firn = {
+    enable = true;
+    publicBaseUrl = "https://cache.example.com";
+    mainSigningKeyFile = config.age.secrets.firn-main-key.path;
+    prSigningKeyFile = config.age.secrets.firn-pr-key.path;
+    adminTokenFile = config.age.secrets.firn-admin-token.path;
+    owners = [
+      {
+        name = "so1ve";
+        owner_type = "user";
+        github_owner_id = 58381667;
+      }
+    ];
+  };
+}
+```
+
+## Other Serverless Platforms (Turso / libSQL)
+
+[src/entry/web.ts](src/entry/web.ts) exports a standard Web Fetch handler
+(`default.fetch` and `createWebApp`) backed by Turso/libSQL over Hrana HTTP
+(`LIBSQL_URL` and `LIBSQL_AUTH_TOKEN`), with zero native dependencies and zero
+filesystem access at runtime. Before deploying (or after adding migrations),
+apply `migrations/*.sql` once with:
+
+```sh
+LIBSQL_URL=libsql://... LIBSQL_AUTH_TOKEN=... firn migrate
+```
+
+Then serve `public/` as static assets, point Vercel, Deno Deploy, Bun, or
+Netlify Edge at `src/entry/web.ts`, and trigger periodic GC via your platform's
+cron calling `POST /api/v1/admin/gc` (or `createWebApp().runScheduledGc()`).
 
 ## Web Dashboard
 
