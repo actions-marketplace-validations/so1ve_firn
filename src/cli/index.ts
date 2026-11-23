@@ -585,7 +585,7 @@ const cli = Clerc.create({
       `  ${out.dim("Unreferenced GHCR blobs will be cleaned on the next GC pass.")}`,
     );
   })
-  .command("gc", "Trigger a garbage collection pass", {
+  .command("gc", "Trigger garbage collection (auto-drains until complete)", {
     help: { group: "admin" },
     flags: {
       ...adminAuthFlags,
@@ -602,13 +602,62 @@ const cli = Clerc.create({
     },
   })
   .on("gc", async (ctx) => {
-    const query = ctx.flags.dryRun ? "?dry_run=true" : "";
-    const report = await adminRequest<GcReport>(
-      requireServer(ctx.flags.server),
-      requireAdminToken(ctx.flags.token),
-      "POST",
-      `/api/v1/admin/gc${query}`,
-    );
+    const server = requireServer(ctx.flags.server);
+    const token = requireAdminToken(ctx.flags.token);
+
+    let report: GcReport;
+    let rounds = 0;
+
+    if (ctx.flags.dryRun) {
+      rounds = 1;
+      report = await adminRequest<GcReport>(
+        server,
+        token,
+        "POST",
+        "/api/v1/admin/gc?dry_run=true",
+      );
+    } else {
+      report = {
+        pr_paths_removed: 0,
+        main_paths_removed: 0,
+        blobs_deleted: 0,
+        blobs_blocked: 0,
+        blobs_skipped: 0,
+        blob_errors: 0,
+      };
+
+      while (true) {
+        rounds += 1;
+        const step = await adminRequest<GcReport>(
+          server,
+          token,
+          "POST",
+          "/api/v1/admin/gc",
+        );
+
+        report.pr_paths_removed += step.pr_paths_removed;
+        report.main_paths_removed += step.main_paths_removed;
+        report.blobs_deleted += step.blobs_deleted;
+        report.blobs_blocked += step.blobs_blocked;
+        report.blobs_skipped = step.blobs_skipped;
+        report.blob_errors += step.blob_errors;
+
+        const madeProgress =
+          step.blobs_deleted > 0 ||
+          step.blobs_blocked > 0 ||
+          step.pr_paths_removed > 0 ||
+          step.main_paths_removed > 0;
+        if (step.blobs_skipped === 0 || !madeProgress) {
+          break;
+        }
+
+        if (!ctx.flags.json) {
+          console.error(
+            `  ${err.dim(`▸ round ${rounds}: deleted=${report.blobs_deleted} (+${step.blobs_deleted}), remaining>=${step.blobs_skipped}`)}`,
+          );
+        }
+      }
+    }
 
     if (ctx.flags.json) {
       console.log(JSON.stringify(report, null, 2));
@@ -619,7 +668,11 @@ const cli = Clerc.create({
     console.log(
       renderBanner(
         "Garbage Collection",
-        ctx.flags.dryRun ? out.yellow("dry-run") : out.green("completed"),
+        ctx.flags.dryRun
+          ? out.yellow("dry-run")
+          : out.green(
+              rounds > 1 ? `completed (${rounds} rounds)` : "completed",
+            ),
       ),
     );
     console.log("");
