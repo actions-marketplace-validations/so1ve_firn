@@ -595,6 +595,30 @@ export async function listStorePaths(
   return result.results;
 }
 
+export async function deleteStorePaths(
+  db: D1Database,
+  filters: {
+    ownerId: string | null;
+    scope: string | null;
+    storeHash: string | null;
+    query: string | null;
+  },
+): Promise<number> {
+  const likePattern = filters.query ? `%${filters.query}%` : null;
+  const result = await db
+    .prepare(
+      `DELETE FROM store_paths
+       WHERE (?1 IS NULL OR blob_id IN (SELECT id FROM blobs WHERE owner_id = ?1))
+         AND (?2 IS NULL OR scope = ?2)
+         AND (?3 IS NULL OR store_hash = ?3)
+         AND (?4 IS NULL OR store_path LIKE ?4)`,
+    )
+    .bind(filters.ownerId, filters.scope, filters.storeHash, likePattern)
+    .run();
+
+  return result.meta.changes ?? 0;
+}
+
 export async function listPrScopes(
   db: D1Database,
   ownerId: string | null,

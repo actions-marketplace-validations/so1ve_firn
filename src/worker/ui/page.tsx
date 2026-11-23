@@ -302,6 +302,17 @@ export function DashboardPage({ data }: { data: DashboardData }) {
                     <option value="100">100</option>
                     <option value="200">200</option>
                   </select>
+                  {data.adminEnabled && (
+                    <button
+                      type="button"
+                      id="delete-matching-btn"
+                      class="btn danger admin-only"
+                      hidden
+                      disabled
+                    >
+                      Delete matching
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -371,13 +382,25 @@ export function DashboardPage({ data }: { data: DashboardData }) {
                                   </span>
                                   <span class="pkg-name">{parts.name}</span>
                                 </a>
-                                <button
-                                  type="button"
-                                  class="link-btn row-action"
-                                  data-copy={item.store_path}
-                                >
-                                  copy
-                                </button>
+                                <span class="path-actions">
+                                  <button
+                                    type="button"
+                                    class="link-btn row-action"
+                                    data-copy={item.store_path}
+                                  >
+                                    copy
+                                  </button>
+                                  {data.adminEnabled && (
+                                    <button
+                                      type="button"
+                                      class="link-btn danger row-action admin-only"
+                                      hidden
+                                      data-delete-path={`${item.scope}\t${parts.hash}`}
+                                    >
+                                      remove
+                                    </button>
+                                  )}
+                                </span>
                               </div>
                             </td>
                             <td class="mono muted">

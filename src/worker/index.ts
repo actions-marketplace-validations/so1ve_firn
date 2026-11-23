@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { loadConfig } from "./config.ts";
 import { runGc } from "./gc.ts";
 import {
+  handleAdminDeletePaths,
   handleAdminDeletePr,
   handleAdminGc,
   handleAdminListPaths,
@@ -55,6 +56,7 @@ function createApp(): Hono<AppBindings> {
 
   app.get("/api/v1/admin/status", handleAdminStatus);
   app.get("/api/v1/admin/paths", handleAdminListPaths);
+  app.delete("/api/v1/admin/paths", handleAdminDeletePaths);
   app.get("/api/v1/admin/prs", handleAdminListPrs);
   app.delete("/api/v1/admin/prs/:owner/:repo/:number", handleAdminDeletePr);
   app.post("/api/v1/admin/gc", handleAdminGc);

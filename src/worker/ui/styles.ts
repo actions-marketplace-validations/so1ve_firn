@@ -227,7 +227,17 @@ select:focus {
   color: var(--accent);
 }
 
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.danger {
+  color: var(--danger);
+  border-color: var(--border-strong);
+}
+
+.btn.danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 input[type="search"],
 input[type="password"],
@@ -447,6 +457,13 @@ tbody tr:last-child td { border-bottom: 0; }
 .pkg-name { font-weight: 500; }
 .hash-prefix { color: var(--faint); }
 
+.path-actions {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  flex: none;
+}
+
 .row-action {
   color: var(--faint);
   font-size: 12px;
@@ -454,6 +471,17 @@ tbody tr:last-child td { border-bottom: 0; }
   text-align: right;
   text-decoration: none;
   flex: none;
+}
+
+.row-action.danger {
+  color: var(--danger);
+  opacity: 0.72;
+}
+
+tr:hover .row-action.danger,
+.row-action.danger:focus-visible {
+  color: var(--danger);
+  opacity: 1;
 }
 
 tr:hover .row-action,

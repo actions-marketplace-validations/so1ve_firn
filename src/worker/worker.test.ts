@@ -773,6 +773,54 @@ describe("firn worker", () => {
     const status = await statusRes.json<AdminStatusResponse>();
 
     expect(status.owners[0]?.blocked_blobs).toHaveLength(1);
+
+    // Admin store path deletion: require at least one filter, then delete matching paths.
+    const bareDelete = await callWorker(
+      new Request("https://cache.so1ve.dev/api/v1/admin/paths", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer admin-secret-token" },
+      }),
+    );
+
+    expect(bareDelete.status).toBe(400);
+
+    const mainJwt = await signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/latchshot",
+      ref: "refs/heads/main",
+      event_name: "push",
+    });
+    await uploadAndCommit(
+      mainJwt,
+      "so1ve/latchshot-cache",
+      "/nix/store/11111111111111111111111111111111-junk.patch",
+      "junk-patch-nar",
+    );
+    await uploadAndCommit(
+      mainJwt,
+      "so1ve/latchshot-cache",
+      "/nix/store/22222222222222222222222222222222-real-app",
+      "real-app-nar",
+    );
+
+    const delMatching = await callWorker(
+      new Request("https://cache.so1ve.dev/api/v1/admin/paths?q=.patch", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer admin-secret-token" },
+      }),
+    );
+
+    expect(delMatching.status).toBe(200);
+    await expect(delMatching.json()).resolves.toEqual({ removed: 1 });
+    await expect(
+      getNarInfo(env.DB, MAIN_SCOPE, "11111111111111111111111111111111"),
+    ).resolves.toBeNull();
+    await expect(
+      getNarInfo(env.DB, MAIN_SCOPE, "22222222222222222222222222222222"),
+    ).resolves.not.toBeNull();
   });
 
   it("preserves transitive dependencies during closure-safe main LRU eviction", async () => {

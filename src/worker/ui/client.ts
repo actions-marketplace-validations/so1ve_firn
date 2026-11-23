@@ -114,6 +114,7 @@ export const CLIENT_SCRIPT = `
   const ownerSelect = document.getElementById("filter-owner");
   const scopeSelect = document.getElementById("filter-scope");
   const limitSelect = document.getElementById("filter-limit");
+  const deleteMatchingBtn = document.getElementById("delete-matching-btn");
   const sortButtons = document.querySelectorAll(".sort-btn[data-sort]");
   const pathsBody = document.getElementById("paths-body");
   const pathsStatus = document.getElementById("paths-status");
@@ -121,6 +122,18 @@ export const CLIENT_SCRIPT = `
   let currentSort = "accessed";
   let filterTimer = null;
   let activeController = null;
+
+  function syncDeleteMatchingState() {
+    if (!deleteMatchingBtn) return;
+    const hasFilter = Boolean(
+      searchInput.value.trim() || ownerSelect.value || scopeSelect.value,
+    );
+    deleteMatchingBtn.disabled = !hasFilter;
+    if (!hasFilter && deleteMatchingBtn.getAttribute("data-armed") === "true") {
+      deleteMatchingBtn.removeAttribute("data-armed");
+      deleteMatchingBtn.textContent = "Delete matching";
+    }
+  }
 
   async function refreshPaths() {
     if (activeController) activeController.abort();
@@ -174,12 +187,24 @@ export const CLIENT_SCRIPT = `
           n.className = "pkg-name";
           n.textContent = parts.name;
           link.append(h, n);
+          const actions = document.createElement("span");
+          actions.className = "path-actions";
           const copyBtn = document.createElement("button");
           copyBtn.type = "button";
           copyBtn.className = "link-btn row-action";
           copyBtn.textContent = "copy";
           copyBtn.setAttribute("data-copy", item.store_path);
-          wrap.append(link, copyBtn);
+          actions.append(copyBtn);
+          if (deleteMatchingBtn) {
+            const removeBtn = document.createElement("button");
+            removeBtn.type = "button";
+            removeBtn.className = "link-btn danger row-action admin-only";
+            removeBtn.hidden = !getToken();
+            removeBtn.textContent = "remove";
+            removeBtn.setAttribute("data-delete-path", item.scope + "\\t" + parts.hash);
+            actions.append(removeBtn);
+          }
+          wrap.append(link, actions);
           tdPath.appendChild(wrap);
 
           const tdScope = document.createElement("td");
@@ -233,11 +258,107 @@ export const CLIENT_SCRIPT = `
   }
 
   searchInput.addEventListener("input", () => {
+    syncDeleteMatchingState();
     clearTimeout(filterTimer);
     filterTimer = setTimeout(refreshPaths, 180);
   });
   [ownerSelect, scopeSelect, limitSelect].forEach((el) => {
-    el.addEventListener("change", refreshPaths);
+    el.addEventListener("change", () => {
+      syncDeleteMatchingState();
+      refreshPaths();
+    });
+  });
+  syncDeleteMatchingState();
+
+  if (deleteMatchingBtn) {
+    deleteMatchingBtn.addEventListener("click", async () => {
+      if (deleteMatchingBtn.getAttribute("data-armed") !== "true") {
+        deleteMatchingBtn.setAttribute("data-armed", "true");
+        deleteMatchingBtn.textContent = "Confirm delete?";
+        setTimeout(() => {
+          if (deleteMatchingBtn.getAttribute("data-armed") === "true") {
+            deleteMatchingBtn.removeAttribute("data-armed");
+            deleteMatchingBtn.textContent = "Delete matching";
+          }
+        }, 4000);
+        return;
+      }
+
+      const token = getToken();
+      if (!token) return;
+      const params = new URLSearchParams();
+      if (searchInput.value.trim()) params.set("q", searchInput.value.trim());
+      if (ownerSelect.value) params.set("owner", ownerSelect.value);
+      if (scopeSelect.value) params.set("scope", scopeSelect.value);
+
+      deleteMatchingBtn.disabled = true;
+      deleteMatchingBtn.removeAttribute("data-armed");
+      deleteMatchingBtn.textContent = "Deleting…";
+      try {
+        const res = await fetch("/api/v1/admin/paths?" + params.toString(), {
+          method: "DELETE",
+          headers: { Authorization: "Bearer " + token },
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        showNotice(
+          "admin-notice",
+          "Removed " + data.removed + " store paths. Run GC to delete unreferenced GHCR blobs.",
+          "ok",
+        );
+        refreshPaths();
+      } catch (error) {
+        showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
+      } finally {
+        deleteMatchingBtn.textContent = "Delete matching";
+        syncDeleteMatchingState();
+      }
+    });
+  }
+
+  document.addEventListener("click", async (event) => {
+    const btn = event.target.closest("[data-delete-path]");
+    if (!btn) return;
+    if (btn.getAttribute("data-armed") !== "true") {
+      btn.setAttribute("data-armed", "true");
+      btn.textContent = "confirm?";
+      setTimeout(() => {
+        if (btn.isConnected && btn.getAttribute("data-armed") === "true") {
+          btn.removeAttribute("data-armed");
+          btn.textContent = "remove";
+        }
+      }, 4000);
+      return;
+    }
+
+    const token = getToken();
+    if (!token) return;
+    const raw = btn.getAttribute("data-delete-path") || "";
+    const sep = raw.indexOf("\\t");
+    const scope = raw.slice(0, sep);
+    const hash = raw.slice(sep + 1);
+    btn.disabled = true;
+    try {
+      const params = new URLSearchParams({ scope, hash });
+      const res = await fetch("/api/v1/admin/paths?" + params.toString(), {
+        method: "DELETE",
+        headers: { Authorization: "Bearer " + token },
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const row = btn.closest("tr");
+      if (row) row.remove();
+      showNotice(
+        "admin-notice",
+        "Removed " + data.removed + " store path. Run GC to delete unreferenced GHCR blobs.",
+        "ok",
+      );
+    } catch (error) {
+      btn.disabled = false;
+      btn.removeAttribute("data-armed");
+      btn.textContent = "remove";
+      showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
+    }
   });
   sortButtons.forEach((btn) => {
     btn.addEventListener("click", () => {

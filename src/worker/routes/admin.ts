@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 
+import { validateStoreHash } from "../../shared/nix-format.ts";
 import type {
   AdminStatusResponse,
   OwnerStatusSummary,
@@ -8,6 +9,7 @@ import type { StorePathSort } from "../db.ts";
 import {
   cacheStats,
   deletePrScope,
+  deleteStorePaths,
   listPrScopes,
   listStorePaths,
   ownerStats,
@@ -114,6 +116,46 @@ export async function handleAdminListPaths(
   );
 
   return c.json(paths);
+}
+
+export async function handleAdminDeletePaths(
+  c: Context<AppBindings>,
+): Promise<Response> {
+  const denied = await requireAdmin(c);
+  if (denied) {
+    return denied;
+  }
+
+  const owner = c.req.query("owner") || null;
+  if (owner && !c.get("config").ownersByName.has(owner)) {
+    return c.text(`unknown owner '${owner}'`, 400);
+  }
+  const scope = c.req.query("scope") || null;
+  const query = c.req.query("q")?.trim() || null;
+  const hash = c.req.query("hash")?.trim() || null;
+  if (hash) {
+    try {
+      validateStoreHash(hash);
+    } catch {
+      return c.text(`invalid store hash '${hash}'`, 400);
+    }
+  }
+
+  if (!owner && !scope && !query && !hash) {
+    return c.text(
+      "at least one filter (owner, scope, q, or hash) is required",
+      400,
+    );
+  }
+
+  const removed = await deleteStorePaths(c.env.DB, {
+    ownerId: owner,
+    scope,
+    storeHash: hash,
+    query,
+  });
+
+  return c.json({ removed });
 }
 
 export async function handleAdminListPrs(
