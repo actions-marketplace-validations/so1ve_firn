@@ -374,6 +374,7 @@ export class GitHubAppClient {
     token: string,
     pkg: string,
     maxPages: number,
+    targetDigests?: ReadonlySet<string>,
   ): Promise<{
     versions: Map<string, number>;
     requestsUsed: number;
@@ -381,6 +382,7 @@ export class GitHubAppClient {
   }> {
     const versionsUrl = `${this.#packageUrl(owner, ownerType, pkg)}/versions`;
     const versions = new Map<string, number>();
+    const remaining = targetDigests ? new Set(targetDigests) : null;
     let requestsUsed = 0;
 
     for (let page = 1; page <= maxPages; page++) {
@@ -401,9 +403,13 @@ export class GitHubAppClient {
       const items = await response.json<{ id: number; name: string }[]>();
       for (const item of items) {
         versions.set(item.name, item.id);
+        remaining?.delete(item.name);
       }
       if (items.length < 100) {
         return { versions, requestsUsed, complete: true };
+      }
+      if (remaining?.size === 0) {
+        return { versions, requestsUsed, complete: false };
       }
     }
 

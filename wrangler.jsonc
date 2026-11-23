@@ -16,7 +16,7 @@
     }
   },
   "triggers": {
-    "crons": ["0 */6 * * *"]
+    "crons": ["*/30 * * * *"]
   },
   "d1_databases": [
     {
@@ -29,6 +29,7 @@
     "PUBLIC_BASE_URL": "https://cache.example.com",
     "GC_PR_TTL_DAYS": "3",
     "GC_MAIN_LRU_DAYS": "15",
+    "GC_MAX_SUBREQUESTS": "40",
     "GITHUB_APP_ID": "",
     "OWNERS_JSON": "[]"
   }

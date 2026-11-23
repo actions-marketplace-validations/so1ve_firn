@@ -33,7 +33,7 @@ and include `inputs.firn.packages.${system}.default` in `environment.systemPacka
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/so1ve/firn)
 
 Cloudflare automatically provisions the D1 database (`DB`), applies
-`migrations/0001_init.sql`, and deploys the Worker. After deploying, set the
+`migrations/`, and deploys the Worker. After deploying, set the
 variables and secrets below in the Cloudflare dashboard (or via Wrangler).
 
 ### Manual deploy
@@ -63,6 +63,9 @@ Environment variables (`vars`):
   audience).
 - `GC_PR_TTL_DAYS` / `GC_MAIN_LRU_DAYS`: PR expiry (default `3`) and
   closure-safe main LRU (default `15`).
+- `GC_MAX_SUBREQUESTS`: max GitHub API subrequests per GC invocation (default
+  `40` for Cloudflare Workers Free plan; increase on Workers Paid plans, e.g.
+  `800`).
 - `GITHUB_APP_ID`: numeric GitHub App ID (optional; required for GHCR GC
   deletion and local manual pushes).
 - `OWNERS_JSON`: JSON array of allowed GitHub users/orgs, for example:

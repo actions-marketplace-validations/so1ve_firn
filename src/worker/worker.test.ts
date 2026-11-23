@@ -24,6 +24,7 @@ import type {
   PlanResponse,
   StorePathSummary,
 } from "../shared/protocol.ts";
+import type { WorkerRuntimeEnv } from "./config.ts";
 import {
   MAIN_SCOPE,
   commitEntries,
@@ -211,8 +212,15 @@ const createMockFetch =
       );
     if (versionsListMatch && method === "GET") {
       const key = `${versionsListMatch[1]}/${versionsListMatch[2]}`;
+      const all = store.versions.get(key) ?? [];
+      const perPage = Number.parseInt(
+        url.searchParams.get("per_page") ?? "100",
+        10,
+      );
+      const page = Number.parseInt(url.searchParams.get("page") ?? "1", 10);
+      const start = (page - 1) * perPage;
 
-      return Response.json(store.versions.get(key) ?? []);
+      return Response.json(all.slice(start, start + perPage));
     }
 
     const versionDeleteMatch =
@@ -277,7 +285,7 @@ describe("firn worker", () => {
   let prKey: SigningKeyPair;
   let rsa: Awaited<ReturnType<typeof generateRsaPair>>;
   let store: MockStore;
-  let testEnv: Env;
+  let testEnv: WorkerRuntimeEnv;
 
   async function callWorker(request: Request): Promise<Response> {
     const ctx = createExecutionContext();
@@ -1150,5 +1158,109 @@ describe("firn worker", () => {
 
     expect(failedRes.status).toBe(500);
     expect(installTokenCalls).toBe(2);
+  });
+
+  it("stops GHCR version listing early and reuses cached ghcr_version_id across GC rounds", async () => {
+    const baseFetch = createMockFetch(rsa.jwk, store);
+    let versionsListCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const reqUrl =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        const url = new URL(reqUrl);
+        if (url.pathname.endsWith("/versions")) {
+          versionsListCalls += 1;
+        }
+
+        return baseFetch(input, init);
+      },
+    );
+
+    const prJwt = await signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/paged",
+      ref: "refs/pull/12/merge",
+      event_name: "pull_request",
+    });
+
+    await uploadAndCommit(
+      prJwt,
+      "so1ve/paged-cache",
+      "/nix/store/11111111111111111111111111111111-first",
+      "first-nar",
+    );
+    await uploadAndCommit(
+      prJwt,
+      "so1ve/paged-cache",
+      "/nix/store/22222222222222222222222222222222-second",
+      "second-nar",
+    );
+    await uploadAndCommit(
+      prJwt,
+      "so1ve/paged-cache",
+      "/nix/store/33333333333333333333333333333333-third",
+      "third-nar",
+    );
+
+    // Pad versions with >100 extra entries on subsequent pages so full pagination would take >=2 pages.
+    const existing = store.versions.get("so1ve/paged-cache") ?? [];
+    for (let i = 0; i < 120; i += 1) {
+      existing.push({
+        id: 1000 + i,
+        name: `sha256:${String(i).padStart(64, "0")}`,
+      });
+    }
+    store.versions.set("so1ve/paged-cache", existing);
+
+    const delPr = await callWorker(
+      new Request("https://cache.so1ve.dev/api/v1/admin/prs/so1ve/paged/12", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer admin-secret-token" },
+      }),
+    );
+
+    expect(delPr.status).toBe(200);
+
+    // Budget = 4: 1 install token + 1 version page + 1 delete (reserving 2 for last-version fallback).
+    testEnv.GC_MAX_SUBREQUESTS = "4";
+
+    const round1 = await (
+      await callWorker(
+        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
+          method: "POST",
+          headers: { Authorization: "Bearer admin-secret-token" },
+        }),
+      )
+    ).json<GcReport>();
+
+    // Early-exit stops after page 1 even though page 2 exists; deletes 1 and skips 2.
+    expect(versionsListCalls).toBe(1);
+    expect(round1.blobs_deleted).toBe(1);
+    expect(round1.blobs_skipped).toBe(2);
+
+    // Round 2 has cached ghcr_version_id for both remaining blobs -> 0 extra /versions list calls.
+    testEnv.GC_MAX_SUBREQUESTS = "5";
+    const round2 = await (
+      await callWorker(
+        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
+          method: "POST",
+          headers: { Authorization: "Bearer admin-secret-token" },
+        }),
+      )
+    ).json<GcReport>();
+
+    expect(versionsListCalls).toBe(1);
+    expect(round2.blobs_deleted).toBe(2);
+    expect(round2.blobs_skipped).toBe(0);
+    await expect(listUnreferencedBlobs(env.DB, "so1ve")).resolves.toEqual([]);
   });
 });

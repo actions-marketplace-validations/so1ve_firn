@@ -42,6 +42,7 @@ export interface LoadedConfig {
   gc: {
     prTtlDays: number;
     mainLruDays: number;
+    maxSubrequests: number;
   };
   adminToken: string | null;
   ownersByName: Map<string, LoadedOwner>;
@@ -103,6 +104,7 @@ export interface WorkerRuntimeEnv {
   OWNERS_JSON: string;
   GC_PR_TTL_DAYS?: string;
   GC_MAIN_LRU_DAYS?: string;
+  GC_MAX_SUBREQUESTS?: string;
   GITHUB_APP_ID?: string;
   MAIN_SIGNING_KEY?: string;
   PR_SIGNING_KEY?: string;
@@ -206,6 +208,7 @@ export async function loadConfig(env: WorkerRuntimeEnv): Promise<LoadedConfig> {
     gc: {
       prTtlDays: parseOptionalPositiveInt(env.GC_PR_TTL_DAYS, 3),
       mainLruDays: parseOptionalPositiveInt(env.GC_MAIN_LRU_DAYS, 15),
+      maxSubrequests: parseOptionalPositiveInt(env.GC_MAX_SUBREQUESTS, 40),
     },
     adminToken: env.ADMIN_TOKEN?.trim() || null,
     ownersByName,

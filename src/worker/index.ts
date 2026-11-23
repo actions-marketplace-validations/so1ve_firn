@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 
+import type { WorkerRuntimeEnv } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import { runGc } from "./gc.ts";
 import {
@@ -90,7 +91,7 @@ const app = createApp();
 export default {
   fetch(
     request: Request,
-    env: Env,
+    env: WorkerRuntimeEnv,
     ctx: ExecutionContext,
   ): Response | Promise<Response> {
     return app.fetch(request, env, ctx);
@@ -98,7 +99,7 @@ export default {
 
   async scheduled(
     _controller: ScheduledController,
-    env: Env,
+    env: WorkerRuntimeEnv,
     ctx: ExecutionContext,
   ): Promise<void> {
     ctx.waitUntil(
@@ -108,4 +109,4 @@ export default {
       })(),
     );
   },
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<WorkerRuntimeEnv>;

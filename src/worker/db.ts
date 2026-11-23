@@ -23,6 +23,7 @@ export interface BlobRecord {
   ghcrPackage: string;
   manifestDigest: string;
   blobDigest: string;
+  ghcrVersionId: number | null;
 }
 
 export interface StoredNarInfo {
@@ -102,6 +103,7 @@ interface BlobRow {
   ghcr_package: string;
   manifest_digest: string;
   blob_digest: string;
+  ghcr_version_id: number | null;
 }
 
 const mapBlobRow = (row: BlobRow): BlobRecord => ({
@@ -110,6 +112,7 @@ const mapBlobRow = (row: BlobRow): BlobRecord => ({
   ghcrPackage: row.ghcr_package,
   manifestDigest: row.manifest_digest,
   blobDigest: row.blob_digest,
+  ghcrVersionId: row.ghcr_version_id,
 });
 
 async function queryNarInfoInScope(
@@ -288,7 +291,7 @@ export async function getBlobForDownload(
 ): Promise<BlobRecord | null> {
   const row = await db
     .prepare(
-      `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest
+      `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
        FROM blobs b
        JOIN store_paths sp ON sp.blob_id = b.id
        WHERE b.blob_digest = ?1
@@ -455,7 +458,7 @@ export async function listUnreferencedBlobs(
 ): Promise<BlobRecord[]> {
   const result = await db
     .prepare(
-      `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest
+      `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
        FROM blobs b
        WHERE b.owner_id = ?1
          AND b.gc_blocked = 0
@@ -465,6 +468,44 @@ export async function listUnreferencedBlobs(
     .all<BlobRow>();
 
   return result.results.map(mapBlobRow);
+}
+
+export async function cacheBlobVersionIds(
+  db: D1Database,
+  ownerId: string,
+  ghcrPackage: string,
+  versions: ReadonlyMap<string, number>,
+): Promise<number> {
+  if (versions.size === 0) {
+    return 0;
+  }
+
+  const rows = await db
+    .prepare(
+      `SELECT id, manifest_digest
+       FROM blobs
+       WHERE owner_id = ?1 AND ghcr_package = ?2 AND ghcr_version_id IS NULL`,
+    )
+    .bind(ownerId, ghcrPackage)
+    .all<{ id: number; manifest_digest: string }>();
+
+  const statements: D1PreparedStatement[] = [];
+  for (const row of rows.results) {
+    const versionId = versions.get(row.manifest_digest);
+    if (versionId !== undefined) {
+      statements.push(
+        db
+          .prepare("UPDATE blobs SET ghcr_version_id = ?1 WHERE id = ?2")
+          .bind(versionId, row.id),
+      );
+    }
+  }
+
+  for (let i = 0; i < statements.length; i += D1_BIND_CHUNK) {
+    await db.batch(statements.slice(i, i + D1_BIND_CHUNK));
+  }
+
+  return statements.length;
 }
 
 export async function deleteBlobIfUnreferenced(

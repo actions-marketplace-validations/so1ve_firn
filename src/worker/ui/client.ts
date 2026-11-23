@@ -426,41 +426,103 @@ export const CLIENT_SCRIPT = `
   }
 
   // Admin GC buttons
-  async function triggerGc(dryRun, btn) {
+  const MAX_UI_GC_ROUNDS = 50;
+  const dryRunBtn = document.getElementById("gc-dry-run-btn");
+  const gcBtn = document.getElementById("gc-run-btn");
+
+  function setGcButtonsDisabled(disabled) {
+    if (dryRunBtn) dryRunBtn.disabled = disabled;
+    if (gcBtn) gcBtn.disabled = disabled;
+  }
+
+  async function triggerGc(dryRun) {
     const token = getToken();
     if (!token) return;
-    btn.disabled = true;
+    setGcButtonsDisabled(true);
     showNotice("admin-notice", dryRun ? "Running dry-run GC…" : "Running GC…", "");
     try {
-      const res = await fetch("/api/v1/admin/gc" + (dryRun ? "?dry_run=true" : ""), {
-        method: "POST",
-        headers: { Authorization: "Bearer " + token },
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const r = await res.json();
+      if (dryRun) {
+        const res = await fetch("/api/v1/admin/gc?dry_run=true", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + token },
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const r = await res.json();
+        showNotice(
+          "admin-notice",
+          "Dry-run GC: pr_removed=" + r.pr_paths_removed +
+            ", main_removed=" + r.main_paths_removed +
+            ", blobs_deleted=" + r.blobs_deleted +
+            ", blocked=" + r.blobs_blocked +
+            ", skipped=" + r.blobs_skipped +
+            ", errors=" + r.blob_errors,
+          r.blob_errors > 0 ? "error" : "ok",
+        );
+        return;
+      }
+
+      const totals = {
+        pr_paths_removed: 0,
+        main_paths_removed: 0,
+        blobs_deleted: 0,
+        blobs_blocked: 0,
+        blobs_skipped: 0,
+        blob_errors: 0,
+      };
+      let rounds = 0;
+
+      while (rounds < MAX_UI_GC_ROUNDS) {
+        rounds += 1;
+        const res = await fetch("/api/v1/admin/gc", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + token },
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const r = await res.json();
+        totals.pr_paths_removed += r.pr_paths_removed;
+        totals.main_paths_removed += r.main_paths_removed;
+        totals.blobs_deleted += r.blobs_deleted;
+        totals.blobs_blocked += r.blobs_blocked;
+        totals.blobs_skipped = r.blobs_skipped;
+        totals.blob_errors += r.blob_errors;
+
+        const madeProgress =
+          r.blobs_deleted > 0 ||
+          r.blobs_blocked > 0 ||
+          r.pr_paths_removed > 0 ||
+          r.main_paths_removed > 0;
+        if (r.blobs_skipped === 0 || !madeProgress || rounds >= MAX_UI_GC_ROUNDS) {
+          break;
+        }
+        showNotice(
+          "admin-notice",
+          "Running GC (round " + (rounds + 1) + ")… blobs_deleted=" +
+            totals.blobs_deleted + ", remaining=" + r.blobs_skipped,
+          "",
+        );
+      }
+
       showNotice(
         "admin-notice",
-        (dryRun ? "Dry-run GC: " : "GC complete: ") +
-          "pr_removed=" + r.pr_paths_removed +
-          ", main_removed=" + r.main_paths_removed +
-          ", blobs_deleted=" + r.blobs_deleted +
-          ", blocked=" + r.blobs_blocked +
-          ", skipped=" + r.blobs_skipped +
-          ", errors=" + r.blob_errors,
-        r.blob_errors > 0 ? "error" : "ok",
+        "GC complete" + (rounds > 1 ? " (" + rounds + " rounds)" : "") + ": " +
+          "pr_removed=" + totals.pr_paths_removed +
+          ", main_removed=" + totals.main_paths_removed +
+          ", blobs_deleted=" + totals.blobs_deleted +
+          ", blocked=" + totals.blobs_blocked +
+          ", skipped=" + totals.blobs_skipped +
+          ", errors=" + totals.blob_errors,
+        totals.blob_errors > 0 ? "error" : "ok",
       );
-      if (!dryRun) refreshPaths();
+      refreshPaths();
     } catch (error) {
       showNotice("admin-notice", error instanceof Error ? error.message : String(error), "error");
     } finally {
-      btn.disabled = false;
+      setGcButtonsDisabled(false);
     }
   }
 
-  const dryRunBtn = document.getElementById("gc-dry-run-btn");
-  const gcBtn = document.getElementById("gc-run-btn");
-  if (dryRunBtn) dryRunBtn.addEventListener("click", () => triggerGc(true, dryRunBtn));
-  if (gcBtn) gcBtn.addEventListener("click", () => triggerGc(false, gcBtn));
+  if (dryRunBtn) dryRunBtn.addEventListener("click", () => triggerGc(true));
+  if (gcBtn) gcBtn.addEventListener("click", () => triggerGc(false));
 
   // Admin PR delete with inline confirm
   document.addEventListener("click", async (event) => {

@@ -10,7 +10,7 @@ import {
 } from "../../shared/nix-format.ts";
 import { OciClient } from "../../shared/oci.ts";
 import type { PublicKeysResponse } from "../../shared/protocol.ts";
-import type { LoadedConfig } from "../config.ts";
+import type { LoadedConfig, WorkerRuntimeEnv } from "../config.ts";
 import { ghcrRepository } from "../config.ts";
 import {
   MAIN_SCOPE,
@@ -23,7 +23,7 @@ import {
 import { acquirePullToken } from "../ghcr.ts";
 
 export interface AppBindings {
-  Bindings: Env;
+  Bindings: WorkerRuntimeEnv;
   Variables: {
     config: LoadedConfig;
   };
