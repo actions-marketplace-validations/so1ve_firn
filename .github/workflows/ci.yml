@@ -19,6 +19,8 @@ jobs:
         with:
           node-version: "24"
       - run: pnpm run cf-typegen
+      - run: pnpm run build:action
+      - run: git diff --exit-code action/dist
       - run: pnpm run check
       - run: pnpm exec wrangler deploy --dry-run
 

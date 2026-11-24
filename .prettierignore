@@ -1,3 +1,4 @@
+/action/dist
 /flake.lock
 /devenv.lock
 /pnpm-lock.yaml

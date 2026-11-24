@@ -7,9 +7,9 @@ import {
   getState,
   listStoreEntries,
   readTrimmedLines,
-} from "./common.mjs";
+} from "./common.ts";
 
-async function main() {
+async function main(): Promise<void> {
   if (getState("should_push") !== "true") {
     return;
   }
@@ -31,7 +31,7 @@ async function main() {
     return;
   }
 
-  let targetPaths;
+  let targetPaths: string[];
   let excludeUnreferencedFods = false;
 
   if (explicitPaths.length > 0) {

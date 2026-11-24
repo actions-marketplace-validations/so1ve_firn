@@ -1,15 +1,9 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 
-import {
-  Clerc,
-  completionsPlugin,
-  friendlyErrorPlugin,
-  helpPlugin,
-  notFoundPlugin,
-  strictFlagsPlugin,
-  versionPlugin,
-} from "clerc";
+import { completionsPlugin } from "@clerc/plugin-completions";
+import type { FlagsDefinition, TypeFunction } from "clerc";
+import { Types, clerc } from "clerc";
 
 import manifest from "../../package.json" with { type: "json" };
 import { runDatabaseMigrations, startNodeServer } from "../entry/node.ts";
@@ -22,13 +16,11 @@ import type {
   StorePathSummary,
 } from "../shared/protocol.ts";
 import {
-  err,
   formatAge,
   formatBytes,
   formatRemainingTtl,
   formatScope,
   formatStorePath,
-  out,
   renderBanner,
   renderKv,
   renderSection,
@@ -36,42 +28,43 @@ import {
 } from "./format.ts";
 import { runPush } from "./push.ts";
 
-function requireServer(value: string | undefined): string {
-  const server = (value ?? process.env.FIRN_SERVER ?? "")
-    .trim()
-    .replace(/\/+$/, "");
-  if (!server) {
-    throw new Error("--server (or FIRN_SERVER) is required");
-  }
+const ServerUrl: TypeFunction<string> = Object.assign(
+  (raw: string): string => {
+    const server = raw.trim().replace(/\/+$/, "");
+    if (!server) {
+      throw new Error("expected a non-empty server URL");
+    }
 
-  return server;
-}
+    return server;
+  },
+  { display: "url" },
+);
 
-function requireAdminToken(value: string | undefined): string {
-  const token = (value ?? process.env.FIRN_ADMIN_TOKEN ?? "").trim();
-  if (!token) {
-    throw new Error("--token (or FIRN_ADMIN_TOKEN) is required");
-  }
+const AdminToken: TypeFunction<string> = Object.assign(
+  (raw: string): string => {
+    const token = raw.trim();
+    if (!token) {
+      throw new Error("expected a non-empty token");
+    }
 
-  return token;
-}
+    return token;
+  },
+  { display: "token" },
+);
 
 async function adminRequest<T>(
-  server: string,
-  token: string,
+  flags: { server: string; token: string },
   method: string,
   apiPath: string,
 ): Promise<T> {
-  const url = `${server}${apiPath}`;
+  const url = `${flags.server}${apiPath}`;
   const response = await fetch(url, {
     method,
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${flags.token}` },
   });
   if (!response.ok) {
-    const body = await response.text().catch(() => "");
-
     throw new Error(
-      `admin request ${method} ${url} failed (${response.status}): ${body}`,
+      `admin request ${method} ${url} failed (${response.status}): ${await response.text().catch(() => "")}`,
     );
   }
 
@@ -80,113 +73,116 @@ async function adminRequest<T>(
 
 const adminAuthFlags = {
   server: {
-    type: String,
-    description: "Base URL of the Firn server (env: FIRN_SERVER)",
+    type: ServerUrl,
+    env: "FIRN_SERVER",
+    required: true,
+    description: "Base URL of the Firn server",
   },
   token: {
-    type: String,
-    description: "Admin Bearer token (env: FIRN_ADMIN_TOKEN)",
+    type: AdminToken,
+    env: "FIRN_ADMIN_TOKEN",
+    required: true,
+    description: "Admin Bearer token",
   },
-} as const;
+} as const satisfies FlagsDefinition;
 
-const cli = Clerc.create({
-  scriptName: "firn",
+const jsonFlag = {
+  json: {
+    type: Boolean,
+    description: "Output raw JSON",
+  },
+} as const satisfies FlagsDefinition;
+
+const dbFlags = {
+  db: {
+    type: String,
+    env: "FIRN_DB_PATH",
+    default: "./firn.db",
+    description: "Local SQLite database path",
+  },
+  libsqlUrl: {
+    type: String,
+    env: "LIBSQL_URL",
+    description: "Remote Turso/libSQL URL (overrides --db)",
+  },
+} as const satisfies FlagsDefinition;
+
+const cli = clerc({
+  name: "firn",
   description: manifest.description,
   version: manifest.version,
+  notes: [
+    "Environment variables:",
+    "  FIRN_SERVER       Base URL of the Firn server",
+    "  FIRN_TOKEN        Static Bearer token for manual pushes",
+    "  FIRN_OWNER        GitHub owner name for manual pushes",
+    "  FIRN_ADMIN_TOKEN  Admin Bearer token for status / ls / pr / gc",
+  ],
 })
-  .use(versionPlugin())
-  .use(
-    helpPlugin({
-      groups: {
-        commands: [
-          ["cache", "Cache"],
-          ["admin", "Administration"],
-          ["server", "Server"],
-        ],
-      },
-      notes: [
-        "Environment variables:",
-        "  FIRN_SERVER       Base URL of the Firn server",
-        "  FIRN_TOKEN        Static Bearer token for manual pushes",
-        "  FIRN_OWNER        GitHub owner name for manual pushes",
-        "  FIRN_ADMIN_TOKEN  Admin Bearer token for status / ls / pr / gc",
-      ],
-    }),
-  )
-  .use(completionsPlugin())
-  .use(strictFlagsPlugin())
-  .use(notFoundPlugin())
-  .use(friendlyErrorPlugin())
-  .errorHandler((error) => {
-    console.error(
-      `${err.boldRed("✗ Error:")} ${error instanceof Error ? error.message : String(error)}`,
-    );
-    process.exit(1);
+  .groups({
+    commands: {
+      cache: "Cache",
+      admin: "Administration",
+      server: "Server",
+    },
   })
-  .command("push", "Push Nix store paths and their closures to a Firn server", {
-    help: { group: "cache" },
-    parameters: ["[paths...]"],
-    flags: {
-      server: {
-        type: String,
-        description: "Base URL of the Firn server (env: FIRN_SERVER)",
+  .use(completionsPlugin())
+  .command("push [paths...]", {
+    description: "Push Nix store paths and their closures to a Firn server",
+    group: "cache",
+    args: {
+      paths: {
+        description: "Nix store paths or symlinks to push",
       },
+    },
+    flags: {
+      server: adminAuthFlags.server,
       owner: {
         type: String,
-        description: "GitHub owner name (env: FIRN_OWNER)",
+        env: "FIRN_OWNER",
+        description: "GitHub owner name",
       },
       token: {
         type: String,
-        description: "Manual push Bearer token (env: FIRN_TOKEN)",
+        env: "FIRN_TOKEN",
+        description: "Manual push Bearer token",
       },
       stdin: {
         type: Boolean,
-        default: false,
         description: "Read newline-separated store paths from stdin",
       },
       includeUpstream: {
         type: Boolean,
-        default: false,
         description: "Upload paths even if signed by cache.nixos.org",
       },
       skipSignedBy: {
         type: [String],
+        default: ["cache.nixos.org-1:"],
         description: "Signature key prefix to skip (repeatable)",
       },
       jobs: {
-        type: Number,
+        type: Types.Integer,
         default: 4,
         description: "Concurrent NAR uploads",
       },
       zstdLevel: {
-        type: Number,
+        type: Types.Range(1, 22),
         default: 3,
         description: "Zstandard compression level",
       },
     },
+    async run(ctx) {
+      await runPush({ ...ctx.flags, ...ctx.args, log: ctx.log });
+    },
   })
-  .on("push", async (ctx) => {
-    const server = requireServer(ctx.flags.server);
-    const skipSignedBy =
-      ctx.flags.skipSignedBy.length > 0
-        ? ctx.flags.skipSignedBy
-        : ["cache.nixos.org-1:"];
-
-    await runPush({
-      server,
-      owner: ctx.flags.owner ?? process.env.FIRN_OWNER,
-      token: ctx.flags.token ?? process.env.FIRN_TOKEN,
-      stdin: ctx.flags.stdin,
-      includeUpstream: ctx.flags.includeUpstream,
-      skipSignedBy,
-      jobs: ctx.flags.jobs,
-      zstdLevel: ctx.flags.zstdLevel,
-      paths: ctx.parameters.paths,
-    });
-  })
-  .command("keygen", "Generate a Nix Ed25519 signing key pair", {
-    help: { group: "cache" },
-    parameters: ["<name>"],
+  .command("keygen <name>", {
+    description: "Generate a Nix Ed25519 signing key pair",
+    group: "cache",
+    args: {
+      name: {
+        description: "Signing key name (e.g. cache.example.com-1)",
+      },
+    },
     flags: {
       secretOut: {
         type: String,
@@ -199,175 +195,153 @@ const cli = Clerc.create({
         description: "Write public key to file",
       },
     },
-  })
-  .on("keygen", async (ctx) => {
-    const pair = await SigningKeyPair.generate(ctx.parameters.name);
-    const secret = pair.secretString();
-    const pub = pair.publicString();
+    async run(ctx) {
+      const { theme } = ctx;
+      const pair = await SigningKeyPair.generate(ctx.args.name);
+      const [secret, pub] = [pair.secretString(), pair.publicString()];
+      if (ctx.flags.secretOut) {
+        fs.writeFileSync(ctx.flags.secretOut, `${secret}\n`, { mode: 0o600 });
+      }
+      if (ctx.flags.publicOut) {
+        fs.writeFileSync(ctx.flags.publicOut, `${pub}\n`);
+      }
 
-    const entries: [string, string][] = [];
-    if (ctx.flags.secretOut) {
-      fs.writeFileSync(ctx.flags.secretOut, `${secret}\n`, { mode: 0o600 });
-      entries.push([
-        "Secret key",
-        `${out.green("wrote")} ${ctx.flags.secretOut}`,
-      ]);
-    } else {
-      entries.push(["Secret key", out.yellow(secret)]);
-    }
-
-    if (ctx.flags.publicOut) {
-      fs.writeFileSync(ctx.flags.publicOut, `${pub}\n`);
-      entries.push([
-        "Public key",
-        `${out.green("wrote")} ${ctx.flags.publicOut}`,
-      ]);
-    } else {
-      entries.push(["Public key", out.green(pub)]);
-    }
-
-    console.log(
-      `${out.boldGreen("✓")} Generated Ed25519 key pair ${out.bold(ctx.parameters.name)}`,
-    );
-    console.log(renderKv(entries));
-  })
-  .command("status", "Show cache keys, usage, and GC-blocked blobs", {
-    help: { group: "admin" },
-    flags: {
-      ...adminAuthFlags,
-      json: {
-        type: Boolean,
-        default: false,
-        description: "Output raw JSON",
-      },
+      ctx.log
+        .success(`Generated Ed25519 key pair ${theme.bold(ctx.args.name)}`)
+        .line(
+          `Secret key  ${ctx.flags.secretOut ? `${theme.success("wrote")} ${ctx.flags.secretOut}` : theme.warn(secret)}`,
+          `Public key  ${ctx.flags.publicOut ? `${theme.success("wrote")} ${ctx.flags.publicOut}` : theme.success(pub)}`,
+        );
     },
   })
-  .on("status", async (ctx) => {
-    const data = await adminRequest<AdminStatusResponse>(
-      requireServer(ctx.flags.server),
-      requireAdminToken(ctx.flags.token),
-      "GET",
-      "/api/v1/admin/status",
-    );
-
-    if (ctx.flags.json) {
-      console.log(JSON.stringify(data, null, 2));
-
-      return;
-    }
-
-    const totalBlobs = data.owners.reduce((sum, o) => sum + o.total_blobs, 0);
-    const totalBytes = data.owners.reduce((sum, o) => sum + o.total_bytes, 0);
-    const totalBlocked = data.owners.reduce(
-      (sum, o) => sum + o.blocked_blobs.length,
-      0,
-    );
-
-    console.log(renderBanner("Firn Cache", data.public_base_url));
-    console.log(renderSection("Overview"));
-    console.log(
-      renderKv([
-        [
-          "Policy",
-          `PR TTL ${out.bold(`${data.gc.pr_ttl_days}d`)}, Main LRU ${out.bold(`${data.gc.main_lru_days}d`)}`,
-        ],
-        [
-          "Store paths",
-          `${out.boldGreen(String(data.main_paths))} main, ${out.boldCyan(String(data.pr_paths))} pr ${out.dim(`(${data.active_prs} active PRs)`)}`,
-        ],
-        [
-          "Storage",
-          `${out.bold(String(totalBlobs))} blobs (${out.bold(formatBytes(totalBytes))})${
-            totalBlocked > 0
-              ? `, ${out.boldYellow(`${totalBlocked} gc-blocked`)}`
-              : ""
-          }`,
-        ],
-        ["Main key", out.dim(data.main_public_key)],
-        ["PR key", out.dim(data.pr_public_key)],
-      ]),
-    );
-
-    console.log(
-      renderSection(
-        "Owners & GHCR Storage",
-        `(${data.owners.length} configured)`,
-      ),
-    );
-    if (data.owners.length === 0) {
-      console.log(`  ${out.dim("No owners configured.")}`);
-    } else {
-      console.log(
-        renderTable<OwnerStatusSummary>(
-          [
-            { header: "OWNER", value: (o) => out.bold(o.name) },
-            { header: "TYPE", value: (o) => out.dim(o.owner_type) },
-            {
-              header: "BLOBS",
-              align: "right",
-              value: (o) => String(o.total_blobs),
-            },
-            {
-              header: "SIZE",
-              align: "right",
-              value: (o) => formatBytes(o.total_bytes),
-            },
-            {
-              header: "UNREF",
-              align: "right",
-              value: (o) =>
-                o.unreferenced_blobs > 0
-                  ? out.yellow(String(o.unreferenced_blobs))
-                  : out.dim("0"),
-            },
-            {
-              header: "ACTIVE PRS",
-              align: "right",
-              value: (o) =>
-                o.active_prs > 0
-                  ? out.cyan(String(o.active_prs))
-                  : out.dim("0"),
-            },
-            {
-              header: "GC-BLOCKED",
-              align: "right",
-              value: (o) =>
-                o.blocked_blobs.length > 0
-                  ? out.boldYellow(String(o.blocked_blobs.length))
-                  : out.dim("0"),
-            },
-          ],
-          data.owners,
-        ),
+  .command("status", {
+    description: "Show cache keys, usage, and GC-blocked blobs",
+    group: "admin",
+    flags: { ...adminAuthFlags, ...jsonFlag },
+    async run(ctx) {
+      const { theme } = ctx;
+      const data = await adminRequest<AdminStatusResponse>(
+        ctx.flags,
+        "GET",
+        "/api/v1/admin/status",
       );
-    }
+      if (ctx.flags.json) {
+        ctx.terminal.stdout(JSON.stringify(data, null, 2));
 
-    const blockedEntries = data.owners.flatMap((owner) =>
-      owner.blocked_blobs.map((blob) => ({ owner: owner.name, ...blob })),
-    );
-    if (blockedEntries.length > 0) {
-      console.log(
-        renderSection(
-          "GC-Blocked Blobs",
-          out.yellow(`(${blockedEntries.length} blocked by GHCR)`),
-        ),
-      );
-      for (const item of blockedEntries) {
-        console.log(
-          `  ${out.yellow("!")} ${out.bold(`${item.owner}/${item.ghcr_package}`)} ${out.dim(`${item.manifest_digest.slice(0, 19)}…`)}`,
-        );
-        console.log(`    ${out.dim(item.reason)}`);
+        return;
       }
-    }
+
+      const totalBlobs = data.owners.reduce((sum, o) => sum + o.total_blobs, 0);
+      const totalBytes = data.owners.reduce((sum, o) => sum + o.total_bytes, 0);
+      const blockedEntries = data.owners.flatMap((owner) =>
+        owner.blocked_blobs.map((blob) => ({ owner: owner.name, ...blob })),
+      );
+
+      ctx.terminal.stdout(
+        renderBanner(theme, "Firn Cache", data.public_base_url),
+      );
+      ctx.terminal.stdout(renderSection(theme, "Overview"));
+      ctx.terminal.stdout(
+        renderKv(theme, [
+          [
+            "Policy",
+            `PR TTL ${theme.bold(`${data.gc.pr_ttl_days}d`)}, Main LRU ${theme.bold(`${data.gc.main_lru_days}d`)}`,
+          ],
+          [
+            "Store paths",
+            `${theme.bold(theme.success(String(data.main_paths)))} main, ${theme.bold(theme.accent(String(data.pr_paths)))} pr ${theme.muted(`(${data.active_prs} active PRs)`)}`,
+          ],
+          [
+            "Storage",
+            `${theme.bold(String(totalBlobs))} blobs (${theme.bold(formatBytes(totalBytes))})${
+              blockedEntries.length > 0
+                ? `, ${theme.bold(theme.warn(`${blockedEntries.length} gc-blocked`))}`
+                : ""
+            }`,
+          ],
+          ["Main key", theme.muted(data.main_public_key)],
+          ["PR key", theme.muted(data.pr_public_key)],
+        ]),
+      );
+
+      ctx.terminal.stdout(
+        renderSection(
+          theme,
+          "Owners & GHCR Storage",
+          `(${data.owners.length} configured)`,
+        ),
+      );
+      if (data.owners.length === 0) {
+        ctx.terminal.stdout(`  ${theme.muted("No owners configured.")}`);
+      } else {
+        ctx.terminal.stdout(
+          renderTable<OwnerStatusSummary>(
+            theme,
+            [
+              { header: "OWNER", value: (o) => theme.bold(o.name) },
+              { header: "TYPE", value: (o) => theme.muted(o.owner_type) },
+              {
+                header: "BLOBS",
+                align: "right",
+                value: (o) => String(o.total_blobs),
+              },
+              {
+                header: "SIZE",
+                align: "right",
+                value: (o) => formatBytes(o.total_bytes),
+              },
+              {
+                header: "UNREF",
+                align: "right",
+                value: (o) =>
+                  o.unreferenced_blobs > 0
+                    ? theme.warn(String(o.unreferenced_blobs))
+                    : theme.muted("0"),
+              },
+              {
+                header: "ACTIVE PRS",
+                align: "right",
+                value: (o) =>
+                  o.active_prs > 0
+                    ? theme.accent(String(o.active_prs))
+                    : theme.muted("0"),
+              },
+              {
+                header: "GC-BLOCKED",
+                align: "right",
+                value: (o) =>
+                  o.blocked_blobs.length > 0
+                    ? theme.bold(theme.warn(String(o.blocked_blobs.length)))
+                    : theme.muted("0"),
+              },
+            ],
+            data.owners,
+          ),
+        );
+      }
+
+      if (blockedEntries.length > 0) {
+        ctx.terminal.stdout(
+          renderSection(
+            theme,
+            "GC-Blocked Blobs",
+            theme.warn(`(${blockedEntries.length} blocked by GHCR)`),
+          ),
+        );
+        for (const item of blockedEntries) {
+          ctx.terminal.stdout(
+            `  ${theme.warn("!")} ${theme.bold(`${item.owner}/${item.ghcr_package}`)} ${theme.muted(`${item.manifest_digest.slice(0, 19)}…`)}\n    ${theme.muted(item.reason)}`,
+          );
+        }
+      }
+    },
   })
-  .command("ls", "List cached store paths ordered by recent access", {
-    help: { group: "admin" },
+  .command("ls", {
+    description: "List cached store paths ordered by recent access",
+    group: "admin",
     flags: {
       ...adminAuthFlags,
-      owner: {
-        type: String,
-        description: "Filter by GitHub owner",
-      },
+      owner: { type: String, description: "Filter by GitHub owner" },
       scope: {
         type: String,
         description: "Filter by scope (main or pr:<owner>:<repo>:<n>)",
@@ -378,246 +352,232 @@ const cli = Clerc.create({
         description: "Filter store paths by substring",
       },
       limit: {
-        type: Number,
+        type: Types.Range(1, 500),
         default: 50,
-        description: "Maximum rows to return (max: 500)",
+        description: "Maximum rows to return",
       },
-      json: {
-        type: Boolean,
-        default: false,
-        description: "Output raw JSON",
-      },
+      ...jsonFlag,
+    },
+    async run(ctx) {
+      const { theme } = ctx;
+      const params = new URLSearchParams({ limit: String(ctx.flags.limit) });
+      if (ctx.flags.owner) {
+        params.set("owner", ctx.flags.owner);
+      }
+      if (ctx.flags.scope) {
+        params.set("scope", ctx.flags.scope);
+      }
+      if (ctx.flags.query) {
+        params.set("q", ctx.flags.query);
+      }
+
+      const items = await adminRequest<StorePathSummary[]>(
+        ctx.flags,
+        "GET",
+        `/api/v1/admin/paths?${params.toString()}`,
+      );
+      if (ctx.flags.json) {
+        ctx.terminal.stdout(JSON.stringify(items, null, 2));
+
+        return;
+      }
+
+      const filters = [
+        ctx.flags.owner && `owner=${ctx.flags.owner}`,
+        ctx.flags.scope && `scope=${ctx.flags.scope}`,
+        ctx.flags.query && `q=${ctx.flags.query}`,
+      ].filter(Boolean);
+      ctx.terminal.stdout(
+        renderBanner(
+          theme,
+          "Store Paths",
+          [
+            `${items.length} shown`,
+            filters.length > 0 ? `(${filters.join(", ")})` : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+        ),
+      );
+      if (items.length === 0) {
+        ctx.terminal.stdout(
+          `\n  ${theme.muted("No cached store paths found.")}`,
+        );
+
+        return;
+      }
+
+      const now = unixNow();
+      ctx.terminal.stdout("");
+      ctx.terminal.stdout(
+        renderTable<StorePathSummary>(
+          theme,
+          [
+            { header: "OWNER", value: (item) => theme.muted(item.owner_id) },
+            {
+              header: "SCOPE",
+              value: (item) => formatScope(theme, item.scope),
+            },
+            {
+              header: "SIZE",
+              align: "right",
+              value: (item) => formatBytes(item.file_size),
+            },
+            {
+              header: "ACCESSED",
+              align: "right",
+              value: (item) =>
+                theme.muted(formatAge(now, item.last_accessed_at)),
+            },
+            {
+              header: "STORE PATH",
+              value: (item) => formatStorePath(theme, item.store_path),
+            },
+          ],
+          items,
+        ),
+      );
     },
   })
-  .on("ls", async (ctx) => {
-    const params = new URLSearchParams({ limit: String(ctx.flags.limit) });
-    if (ctx.flags.owner) {
-      params.set("owner", ctx.flags.owner);
-    }
-    if (ctx.flags.scope) {
-      params.set("scope", ctx.flags.scope);
-    }
-    if (ctx.flags.query) {
-      params.set("q", ctx.flags.query);
-    }
-
-    const items = await adminRequest<StorePathSummary[]>(
-      requireServer(ctx.flags.server),
-      requireAdminToken(ctx.flags.token),
-      "GET",
-      `/api/v1/admin/paths?${params.toString()}`,
-    );
-
-    if (ctx.flags.json) {
-      console.log(JSON.stringify(items, null, 2));
-
-      return;
-    }
-
-    const filters = [
-      ctx.flags.owner ? `owner=${ctx.flags.owner}` : null,
-      ctx.flags.scope ? `scope=${ctx.flags.scope}` : null,
-      ctx.flags.query ? `q=${ctx.flags.query}` : null,
-    ].filter(Boolean);
-    const subtitle = [
-      `${items.length} shown`,
-      ...(filters.length > 0 ? [`(${filters.join(", ")})`] : []),
-    ].join(" ");
-
-    console.log(renderBanner("Store Paths", subtitle));
-    if (items.length === 0) {
-      console.log(`\n  ${out.dim("No cached store paths found.")}`);
-
-      return;
-    }
-
-    const now = unixNow();
-    console.log("");
-    console.log(
-      renderTable<StorePathSummary>(
-        [
-          { header: "OWNER", value: (item) => out.dim(item.owner_id) },
-          { header: "SCOPE", value: (item) => formatScope(item.scope) },
-          {
-            header: "SIZE",
-            align: "right",
-            value: (item) => formatBytes(item.file_size),
-          },
-          {
-            header: "ACCESSED",
-            align: "right",
-            value: (item) => out.dim(formatAge(now, item.last_accessed_at)),
-          },
-          {
-            header: "STORE PATH",
-            value: (item) => formatStorePath(item.store_path),
-          },
-        ],
-        items,
-      ),
-    );
+  .command("pr", {
+    description: "Inspect and manage PR cache overlays",
+    group: "admin",
   })
-  .command("pr ls", "List active PR overlays and remaining TTL", {
-    help: { group: "admin" },
+  .command("pr ls", {
+    description: "List active PR overlays and remaining TTL",
     flags: {
       ...adminAuthFlags,
-      owner: {
-        type: String,
-        description: "Filter by GitHub owner",
-      },
-      json: {
-        type: Boolean,
-        default: false,
-        description: "Output raw JSON",
-      },
+      owner: { type: String, description: "Filter by GitHub owner" },
+      ...jsonFlag,
+    },
+    async run(ctx) {
+      const { theme } = ctx;
+      const prsPath = `/api/v1/admin/prs${ctx.flags.owner ? `?owner=${encodeURIComponent(ctx.flags.owner)}` : ""}`;
+      if (ctx.flags.json) {
+        ctx.terminal.stdout(
+          JSON.stringify(
+            await adminRequest<PrScopeSummary[]>(ctx.flags, "GET", prsPath),
+            null,
+            2,
+          ),
+        );
+
+        return;
+      }
+
+      const [status, prs] = await Promise.all([
+        adminRequest<AdminStatusResponse>(
+          ctx.flags,
+          "GET",
+          "/api/v1/admin/status",
+        ),
+        adminRequest<PrScopeSummary[]>(ctx.flags, "GET", prsPath),
+      ]);
+
+      ctx.terminal.stdout(
+        renderBanner(
+          theme,
+          "Active PR Overlays",
+          `${prs.length} active (TTL ${status.gc.pr_ttl_days}d)`,
+        ),
+      );
+      if (prs.length === 0) {
+        ctx.terminal.stdout(`\n  ${theme.muted("No active PR overlays.")}`);
+
+        return;
+      }
+
+      const now = unixNow();
+      ctx.terminal.stdout("");
+      ctx.terminal.stdout(
+        renderTable<PrScopeSummary>(
+          theme,
+          [
+            {
+              header: "REPOSITORY",
+              value: (pr) => theme.bold(`${pr.owner_id}/${pr.repo}`),
+            },
+            {
+              header: "PR",
+              align: "right",
+              value: (pr) => theme.accent(`#${pr.pr_number}`),
+            },
+            {
+              header: "PATHS",
+              align: "right",
+              value: (pr) => String(pr.path_count),
+            },
+            {
+              header: "UPDATED",
+              align: "right",
+              value: (pr) => theme.muted(formatAge(now, pr.updated_at)),
+            },
+            {
+              header: "TTL",
+              value: (pr) => {
+                const ttl = formatRemainingTtl(
+                  now,
+                  pr.updated_at,
+                  status.gc.pr_ttl_days,
+                );
+
+                return ttl.state === "expired"
+                  ? theme.error(ttl.text)
+                  : ttl.state === "warn"
+                    ? theme.warn(ttl.text)
+                    : theme.success(ttl.text);
+              },
+            },
+            {
+              header: "OVERLAY URL",
+              value: (pr) =>
+                theme.muted(
+                  `${status.public_base_url}/pr/${pr.owner_id}/${pr.repo}/${pr.pr_number}`,
+                ),
+            },
+          ],
+          prs,
+        ),
+      );
     },
   })
-  .on("pr ls", async (ctx) => {
-    const server = requireServer(ctx.flags.server);
-    const token = requireAdminToken(ctx.flags.token);
-    const prsPath = `/api/v1/admin/prs${ctx.flags.owner ? `?owner=${encodeURIComponent(ctx.flags.owner)}` : ""}`;
-
-    if (ctx.flags.json) {
-      const prs = await adminRequest<PrScopeSummary[]>(
-        server,
-        token,
-        "GET",
-        prsPath,
-      );
-      console.log(JSON.stringify(prs, null, 2));
-
-      return;
-    }
-
-    const [status, prs] = await Promise.all([
-      adminRequest<AdminStatusResponse>(
-        server,
-        token,
-        "GET",
-        "/api/v1/admin/status",
-      ),
-      adminRequest<PrScopeSummary[]>(server, token, "GET", prsPath),
-    ]);
-
-    console.log(
-      renderBanner(
-        "Active PR Overlays",
-        `${prs.length} active (TTL ${status.gc.pr_ttl_days}d)`,
-      ),
-    );
-    if (prs.length === 0) {
-      console.log(`\n  ${out.dim("No active PR overlays.")}`);
-
-      return;
-    }
-
-    const now = unixNow();
-    console.log("");
-    console.log(
-      renderTable<PrScopeSummary>(
-        [
-          {
-            header: "REPOSITORY",
-            value: (pr) => out.bold(`${pr.owner_id}/${pr.repo}`),
-          },
-          {
-            header: "PR",
-            align: "right",
-            value: (pr) => out.cyan(`#${pr.pr_number}`),
-          },
-          {
-            header: "PATHS",
-            align: "right",
-            value: (pr) => String(pr.path_count),
-          },
-          {
-            header: "UPDATED",
-            align: "right",
-            value: (pr) => out.dim(formatAge(now, pr.updated_at)),
-          },
-          {
-            header: "TTL",
-            value: (pr) => {
-              const ttl = formatRemainingTtl(
-                now,
-                pr.updated_at,
-                status.gc.pr_ttl_days,
-              );
-              if (ttl.state === "expired") {
-                return out.red(ttl.text);
-              }
-              if (ttl.state === "warn") {
-                return out.yellow(ttl.text);
-              }
-
-              return out.green(ttl.text);
-            },
-          },
-          {
-            header: "OVERLAY URL",
-            value: (pr) =>
-              out.dim(
-                `${status.public_base_url}/pr/${pr.owner_id}/${pr.repo}/${pr.pr_number}`,
-              ),
-          },
-        ],
-        prs,
-      ),
-    );
-  })
-  .command("pr rm", "Delete a PR overlay immediately", {
-    help: { group: "admin" },
-    parameters: ["<owner>", "<repo>", "<number>"],
+  .command("pr rm <owner> <repo> <number>", {
+    description: "Delete a PR overlay immediately",
+    args: {
+      owner: { description: "GitHub owner name" },
+      repo: { description: "Repository name" },
+      number: { type: Types.Integer, description: "Pull request number" },
+    },
     flags: adminAuthFlags,
+    async run(ctx) {
+      const { theme } = ctx;
+      const { owner, repo, number } = ctx.args;
+      const res = await adminRequest<{ removed: number }>(
+        ctx.flags,
+        "DELETE",
+        `/api/v1/admin/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}`,
+      );
+      ctx.log
+        .success(
+          `Removed PR overlay ${theme.bold(`${owner}/${repo}#${String(number)}`)} ${theme.muted(`(${res.removed} store paths deleted)`)}`,
+        )
+        .line("Unreferenced GHCR blobs will be cleaned on the next GC pass.");
+    },
   })
-  .on("pr rm", async (ctx) => {
-    const { owner, repo, number } = ctx.parameters;
-    const res = await adminRequest<{ removed: number }>(
-      requireServer(ctx.flags.server),
-      requireAdminToken(ctx.flags.token),
-      "DELETE",
-      `/api/v1/admin/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(number)}`,
-    );
-    console.log(
-      `${out.boldGreen("✓")} Removed PR overlay ${out.bold(`${owner}/${repo}#${number}`)} ${out.dim(`(${res.removed} store paths deleted)`)}`,
-    );
-    console.log(
-      `  ${out.dim("Unreferenced GHCR blobs will be cleaned on the next GC pass.")}`,
-    );
-  })
-  .command("gc", "Trigger garbage collection (auto-drains until complete)", {
-    help: { group: "admin" },
+  .command("gc", {
+    description: "Trigger garbage collection (auto-drains until complete)",
+    group: "admin",
     flags: {
       ...adminAuthFlags,
       dryRun: {
         type: Boolean,
-        default: false,
         description: "Report what would be deleted without deleting anything",
       },
-      json: {
-        type: Boolean,
-        default: false,
-        description: "Output raw JSON",
-      },
+      ...jsonFlag,
     },
-  })
-  .on("gc", async (ctx) => {
-    const server = requireServer(ctx.flags.server);
-    const token = requireAdminToken(ctx.flags.token);
-
-    let report: GcReport;
-    let rounds = 0;
-
-    if (ctx.flags.dryRun) {
-      rounds = 1;
-      report = await adminRequest<GcReport>(
-        server,
-        token,
-        "POST",
-        "/api/v1/admin/gc?dry_run=true",
-      );
-    } else {
-      report = {
+    async run(ctx) {
+      const { theme } = ctx;
+      const report: GcReport = {
         pr_paths_removed: 0,
         main_paths_removed: 0,
         blobs_deleted: 0,
@@ -625,16 +585,14 @@ const cli = Clerc.create({
         blobs_skipped: 0,
         blob_errors: 0,
       };
+      const apiPath = ctx.flags.dryRun
+        ? "/api/v1/admin/gc?dry_run=true"
+        : "/api/v1/admin/gc";
+      let rounds = 0;
 
       while (true) {
         rounds += 1;
-        const step = await adminRequest<GcReport>(
-          server,
-          token,
-          "POST",
-          "/api/v1/admin/gc",
-        );
-
+        const step = await adminRequest<GcReport>(ctx.flags, "POST", apiPath);
         report.pr_paths_removed += step.pr_paths_removed;
         report.main_paths_removed += step.main_paths_removed;
         report.blobs_deleted += step.blobs_deleted;
@@ -650,150 +608,138 @@ const cli = Clerc.create({
           step.blobs_blocked > 0 ||
           step.pr_paths_removed > 0 ||
           step.main_paths_removed > 0;
-        if (step.blobs_skipped === 0 || !madeProgress) {
+        if (ctx.flags.dryRun || step.blobs_skipped === 0 || !madeProgress) {
           break;
         }
-
         if (!ctx.flags.json) {
-          console.error(
-            `  ${err.dim(`▸ round ${rounds}: ${report.blobs_deleted} blobs deleted (+${step.blobs_deleted})`)}`,
+          ctx.terminal.stderr(
+            `  ${theme.muted(`▸ round ${rounds}: ${report.blobs_deleted} blobs deleted (+${step.blobs_deleted})`)}`,
           );
         }
       }
-    }
 
-    if (ctx.flags.json) {
-      console.log(JSON.stringify(report, null, 2));
+      if (ctx.flags.json) {
+        ctx.terminal.stdout(JSON.stringify(report, null, 2));
 
-      return;
-    }
+        return;
+      }
 
-    console.log(
-      renderBanner(
-        "Garbage Collection",
-        ctx.flags.dryRun
-          ? out.yellow("dry-run")
-          : out.green(
-              rounds > 1 ? `completed (${rounds} rounds)` : "completed",
-            ),
-      ),
-    );
-    console.log("");
-    console.log(
-      renderKv([
-        ["PR paths removed", out.bold(String(report.pr_paths_removed))],
-        ["Main paths removed", out.bold(String(report.main_paths_removed))],
-        [
-          "Blobs deleted",
-          report.blobs_deleted > 0
-            ? out.boldGreen(String(report.blobs_deleted))
-            : out.dim("0"),
-        ],
-        [
-          "Blobs blocked",
-          report.blobs_blocked > 0
-            ? out.boldYellow(String(report.blobs_blocked))
-            : out.dim("0"),
-        ],
-        [
-          "Blobs skipped",
-          report.blobs_skipped > 0
-            ? out.yellow(String(report.blobs_skipped))
-            : out.dim("0"),
-        ],
-        [
-          "Blob errors",
-          report.blob_errors > 0
-            ? out.boldRed(String(report.blob_errors))
-            : out.green("0"),
-        ],
-        ...(report.last_error
-          ? [["Last error", out.red(report.last_error)] as [string, string]]
-          : []),
-      ]),
-    );
+      ctx.terminal.stdout(
+        renderBanner(
+          theme,
+          "Garbage Collection",
+          ctx.flags.dryRun
+            ? theme.warn("dry-run")
+            : theme.success(
+                rounds > 1 ? `completed (${rounds} rounds)` : "completed",
+              ),
+        ),
+      );
+      ctx.terminal.stdout("");
+      ctx.terminal.stdout(
+        renderKv(theme, [
+          ["PR paths removed", theme.bold(String(report.pr_paths_removed))],
+          ["Main paths removed", theme.bold(String(report.main_paths_removed))],
+          [
+            "Blobs deleted",
+            report.blobs_deleted > 0
+              ? theme.bold(theme.success(String(report.blobs_deleted)))
+              : theme.muted("0"),
+          ],
+          [
+            "Blobs blocked",
+            report.blobs_blocked > 0
+              ? theme.bold(theme.warn(String(report.blobs_blocked)))
+              : theme.muted("0"),
+          ],
+          [
+            "Blobs skipped",
+            report.blobs_skipped > 0
+              ? theme.warn(String(report.blobs_skipped))
+              : theme.muted("0"),
+          ],
+          [
+            "Blob errors",
+            report.blob_errors > 0
+              ? theme.error(String(report.blob_errors))
+              : theme.success("0"),
+          ],
+          ...(report.last_error
+            ? [
+                ["Last error", theme.error(report.last_error)] as [
+                  string,
+                  string,
+                ],
+              ]
+            : []),
+        ]),
+      );
+    },
   })
-  .command("serve", "Run a self-hosted Firn server (Node SQLite or libSQL)", {
-    help: { group: "server" },
+  .command("serve", {
+    description: "Run a self-hosted Firn server (Node SQLite or libSQL)",
+    group: "server",
     flags: {
       host: {
         type: String,
-        description: "Bind address (default: HOST env or 127.0.0.1)",
+        env: "HOST",
+        default: "127.0.0.1",
+        description: "Bind address",
       },
       port: {
-        type: Number,
-        description: "Bind port (default: PORT env or 8787)",
+        type: Types.Integer,
+        env: "PORT",
+        default: 8787,
+        description: "Bind port",
       },
-      db: {
-        type: String,
-        description:
-          "Local SQLite database path (default: FIRN_DB_PATH env or ./firn.db)",
-      },
-      libsqlUrl: {
-        type: String,
-        description:
-          "Remote Turso/libSQL URL (overrides --db; default: LIBSQL_URL env)",
-      },
+      ...dbFlags,
       gcInterval: {
-        type: Number,
-        description:
-          "Periodic GC interval in minutes; 0 disables (default: GC_INTERVAL_MINUTES env or 30)",
+        type: Types.Integer,
+        env: "GC_INTERVAL_MINUTES",
+        default: 30,
+        description: "Periodic GC interval in minutes (0 disables)",
       },
     },
-  })
-  .on("serve", async (ctx) => {
-    const running = await startNodeServer({
-      host: ctx.flags.host,
-      port: ctx.flags.port,
-      dbPath: ctx.flags.db,
-      libsqlUrl: ctx.flags.libsqlUrl,
-      gcIntervalMinutes: ctx.flags.gcInterval,
-    });
-
-    function shutdown(signal: string) {
-      console.log(
-        JSON.stringify({ message: "shutting down firn server", signal }),
-      );
-      void running.close().finally(() => {
-        process.exit(0);
+    async run(ctx) {
+      const running = await startNodeServer({
+        host: ctx.flags.host,
+        port: ctx.flags.port,
+        dbPath: ctx.flags.db,
+        libsqlUrl: ctx.flags.libsqlUrl,
+        gcIntervalMinutes: ctx.flags.gcInterval,
+        env: { ...ctx.terminal.env },
       });
-    }
 
-    process.once("SIGINT", () => shutdown("SIGINT"));
-    process.once("SIGTERM", () => shutdown("SIGTERM"));
-  })
-  .command(
-    "migrate",
-    "Apply SQL migrations to a SQLite or Turso/libSQL database",
-    {
-      help: { group: "server" },
-      flags: {
-        db: {
-          type: String,
-          description:
-            "Local SQLite database path (default: FIRN_DB_PATH env or ./firn.db)",
-        },
-        libsqlUrl: {
-          type: String,
-          description:
-            "Remote Turso/libSQL URL (overrides --db; default: LIBSQL_URL env)",
-        },
-      },
+      function shutdown(signal: string) {
+        ctx.terminal.stdout(
+          JSON.stringify({ message: "shutting down firn server", signal }),
+        );
+        void running.close().finally(() => process.exit(0));
+      }
+
+      process.once("SIGINT", () => shutdown("SIGINT"));
+      process.once("SIGTERM", () => shutdown("SIGTERM"));
     },
-  )
-  .on("migrate", async (ctx) => {
-    const { applied, storage } = await runDatabaseMigrations({
-      dbPath: ctx.flags.db,
-      libsqlUrl: ctx.flags.libsqlUrl,
-    });
+  })
+  .command("migrate", {
+    description: "Apply SQL migrations to a SQLite or Turso/libSQL database",
+    group: "server",
+    flags: dbFlags,
+    async run(ctx) {
+      const { applied, storage } = await runDatabaseMigrations({
+        dbPath: ctx.flags.db,
+        libsqlUrl: ctx.flags.libsqlUrl,
+        env: { ...ctx.terminal.env },
+      });
 
-    if (applied.length === 0) {
-      console.log(`Database (${storage}) is already up to date.`);
-    } else {
-      console.log(
-        `Applied ${applied.length} migration(s) to ${storage}: ${applied.join(", ")}`,
-      );
-    }
+      if (applied.length === 0) {
+        ctx.log.info(`Database (${storage}) is already up to date.`);
+      } else {
+        ctx.log.success(
+          `Applied ${applied.length} migration(s) to ${storage}: ${applied.join(", ")}`,
+        );
+      }
+    },
   });
 
-await cli.parse();
+await cli.runMain();

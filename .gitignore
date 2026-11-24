@@ -4,5 +4,5 @@ node_modules/
 wrangler.prod.jsonc
 .devenv/
 .direnv/
-dist/
+/dist/
 result

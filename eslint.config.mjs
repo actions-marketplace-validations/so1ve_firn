@@ -5,6 +5,7 @@ export default so1ve({
     "**/.devenv/**",
     "**/.direnv/**",
     "**/.wrangler/**",
+    "action/dist/**",
     "worker-configuration.d.ts",
   ],
   typescript: {

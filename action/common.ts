@@ -1,18 +1,33 @@
 import fs from "node:fs";
 import os from "node:os";
 
+export { errorMessage } from "../src/shared/format.ts";
+
 const STORE_DIR = "/nix/store";
 const STORE_ENTRY_RE = /^[0-9a-df-np-sv-z]{32}-/;
 
-export const getInput = (name) =>
+export interface PullRequestEventPayload {
+  pull_request?: {
+    number?: number;
+    head?: {
+      repo?: {
+        full_name?: string;
+      };
+    };
+  };
+}
+
+export const getInput = (name: string): string =>
   (process.env[`INPUT_${name.toUpperCase()}`] ?? "").trim();
 
-export const getState = (name) => (process.env[`STATE_${name}`] ?? "").trim();
+export const getState = (name: string): string =>
+  (process.env[`STATE_${name}`] ?? "").trim();
 
-export const errorMessage = (error) =>
-  error instanceof Error ? error.message : String(error);
-
-function appendEnvFile(filePath, name, value) {
+function appendEnvFile(
+  filePath: string | undefined,
+  name: string,
+  value: string,
+): void {
   if (!filePath) {
     return;
   }
@@ -23,15 +38,15 @@ function appendEnvFile(filePath, name, value) {
   );
 }
 
-export const saveState = (name, value) =>
+export const saveState = (name: string, value: string): void =>
   appendEnvFile(process.env.GITHUB_STATE, name, value);
 
-export const exportEnv = (name, value) =>
+export const exportEnv = (name: string, value: string): void =>
   appendEnvFile(process.env.GITHUB_ENV, name, value);
 
-export const tempDir = () => process.env.RUNNER_TEMP || os.tmpdir();
+export const tempDir = (): string => process.env.RUNNER_TEMP || os.tmpdir();
 
-export function readTrimmedLines(filePath) {
+export function readTrimmedLines(filePath: string): string[] {
   if (!filePath || !fs.existsSync(filePath)) {
     return [];
   }
@@ -43,7 +58,7 @@ export function readTrimmedLines(filePath) {
     .filter(Boolean);
 }
 
-export function listStoreEntries() {
+export function listStoreEntries(): string[] {
   if (!fs.existsSync(STORE_DIR)) {
     return [];
   }
@@ -58,13 +73,15 @@ export function listStoreEntries() {
     .sort();
 }
 
-export function readEventPayload() {
+export function readEventPayload(): PullRequestEventPayload {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath || !fs.existsSync(eventPath)) {
     return {};
   }
   try {
-    return JSON.parse(fs.readFileSync(eventPath, "utf8"));
+    return JSON.parse(
+      fs.readFileSync(eventPath, "utf8"),
+    ) as PullRequestEventPayload;
   } catch {
     return {};
   }

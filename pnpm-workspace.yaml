@@ -1,5 +1,15 @@
+minimumReleaseAgeExclude:
+  - "@clerc/logger@2.0.0-beta.1"
+  - "@clerc/plugin-completions@2.0.0-beta.1"
+  - "@clerc/theme@2.0.0-beta.1"
+  - clerc@2.0.0-beta.1
 shellEmulator: true
 
 allowBuilds:
   esbuild: true
   workerd: true
+
+packageExtensions:
+  "@so1ve/eslint-config":
+    dependencies:
+      typescript: "^6.0.3"

@@ -1,9 +1,12 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
+import manifest from "../../package.json" with { type: "json" };
 import { resolveEnvWithFiles, startNodeServer } from "../entry/node.ts";
 import { createWebApp } from "../entry/web.ts";
 import { SigningKeyPair, unixNow } from "../shared/nix-format.ts";
@@ -27,6 +30,9 @@ import {
   listStorePaths,
   listUnreferencedBlobs,
 } from "./db.ts";
+
+const execFileAsync = promisify(execFile);
+const CLI_ENTRY = path.resolve(import.meta.dirname, "../cli/index.ts");
 
 describe("portable Firn server & database adapters", () => {
   it("loads SQL migrations directly from migrations/*.sql", () => {
@@ -422,6 +428,73 @@ describe("portable Firn server & database adapters", () => {
       } finally {
         await running.close();
       }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("executes CLI help, completions, keygen, migrate, and flag validation", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "firn-cli-test-"));
+    try {
+      const secretPath = path.join(tmpDir, "secret.key");
+      const publicPath = path.join(tmpDir, "public.key");
+      const dbPath = path.join(tmpDir, "cli.db");
+
+      const [versionOut, helpOut, prHelpOut, zshComp, keygenOut, migrateOut] =
+        await Promise.all([
+          execFileAsync(process.execPath, [CLI_ENTRY, "--version"]),
+          execFileAsync(process.execPath, [CLI_ENTRY, "--help"]),
+          execFileAsync(process.execPath, [CLI_ENTRY, "pr"]),
+          execFileAsync(process.execPath, [CLI_ENTRY, "completions", "zsh"]),
+          execFileAsync(process.execPath, [
+            CLI_ENTRY,
+            "keygen",
+            "cache.cli-test-1",
+            "-s",
+            secretPath,
+            "-p",
+            publicPath,
+          ]),
+          execFileAsync(process.execPath, [
+            CLI_ENTRY,
+            "migrate",
+            "--db",
+            dbPath,
+          ]),
+        ]);
+
+      expect(versionOut.stdout.trim()).toBe(`firn v${manifest.version}`);
+      expect(helpOut.stdout).toContain("CACHE");
+      expect(helpOut.stdout).toContain("ADMINISTRATION");
+      expect(helpOut.stdout).toContain("SERVER");
+      expect(helpOut.stdout).toContain("FIRN_SERVER");
+      expect(prHelpOut.stdout).toContain("ls");
+      expect(prHelpOut.stdout).toContain("rm");
+      expect(zshComp.stdout).toContain("#compdef firn");
+      expect(keygenOut.stdout).toContain("cache.cli-test-1");
+      expect(fs.readFileSync(publicPath, "utf8").trim()).toMatch(
+        /^cache\.cli-test-1:/,
+      );
+      expect(fs.statSync(secretPath).mode & 0o777).toBe(0o600);
+      expect(migrateOut.stdout).toContain("Applied 3 migration(s)");
+
+      const missingFlagError = await execFileAsync(
+        process.execPath,
+        [CLI_ENTRY, "status"],
+        {
+          env: {
+            ...process.env,
+            FIRN_SERVER: "",
+            FIRN_ADMIN_TOKEN: "",
+            NO_COLOR: "1",
+          },
+        },
+      ).catch((error: unknown) => error as { code?: number; stderr?: string });
+
+      expect(missingFlagError).toMatchObject({ code: 2 });
+      expect(
+        "stderr" in missingFlagError ? missingFlagError.stderr : "",
+      ).toContain("FIRN_SERVER");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

@@ -13,7 +13,9 @@
     "skipLibCheck": true
   },
   "include": [
+    "action/**/*.ts",
     "src/**/*.ts",
+    "tsdown.config.ts",
     "vitest.config.ts",
     "vitest.node.config.ts",
     "worker-configuration.d.ts"

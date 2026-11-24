@@ -5,6 +5,9 @@ import readline from "node:readline";
 import { promisify } from "node:util";
 import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 
+import type { Logger } from "clerc";
+import { createLogger } from "clerc";
+
 import {
   encodeHex,
   formatSha256NixBase32,
@@ -19,13 +22,7 @@ import type {
   PlanRequest,
   PlanResponse,
 } from "../shared/protocol.ts";
-import {
-  err,
-  formatBytes,
-  formatDurationMs,
-  formatStorePath,
-  out,
-} from "./format.ts";
+import { formatBytes, formatDurationMs, formatStorePath } from "./format.ts";
 
 const execFileAsync = promisify(execFile);
 const COMMIT_BATCH_SIZE = 15;
@@ -42,6 +39,7 @@ export interface PushOptions {
   jobs: number;
   zstdLevel: number;
   paths: string[];
+  log?: Logger;
 }
 
 export interface NixPathInfo {
@@ -316,10 +314,12 @@ function filterReachableFromBuiltOutputs(
 }
 
 export async function runPush(options: PushOptions): Promise<void> {
+  const log = options.log ?? createLogger();
+  const { theme } = log;
   const startedAt = Date.now();
   const rawPaths = await collectInputPaths(options);
   if (rawPaths.length === 0) {
-    console.error(`${err.dim("▸")} No store paths provided; nothing to push.`);
+    log.info("No store paths provided; nothing to push.");
 
     return;
   }
@@ -349,8 +349,8 @@ export async function runPush(options: PushOptions): Promise<void> {
   ].filter(Boolean);
 
   if (candidates.length === 0) {
-    console.error(
-      `${err.green("✓")} Nothing to upload: 0 candidate paths ${err.dim(`(${[...skipSummary, `closure=${rawClosure.length}`].join(", ")})`)}`,
+    log.info(
+      `Nothing to upload: 0 candidate paths ${theme.muted(`(${[...skipSummary, `closure=${rawClosure.length}`].join(", ")})`)}`,
     );
 
     return;
@@ -377,15 +377,15 @@ export async function runPush(options: PushOptions): Promise<void> {
   ];
 
   if (plan.missing.length === 0) {
-    console.error(
-      `${err.green("✓")} Nothing to upload: ${alreadyCached} already cached ${err.dim(`(${planMeta.join(", ")})`)}`,
+    log.info(
+      `Nothing to upload: ${alreadyCached} already cached ${theme.muted(`(${planMeta.join(", ")})`)}`,
     );
 
     return;
   }
 
-  console.error(
-    `${err.cyan("▸")} Uploading ${err.bold(String(plan.missing.length))} store paths to ${err.bold(plan.ghcr_repository)} ${err.dim(`(cached=${alreadyCached}, ${planMeta.slice(0, -1).join(", ")}, jobs=${options.jobs})`)}`,
+  const uploadEntry = log.step(
+    `Uploading ${theme.bold(String(plan.missing.length))} store paths to ${theme.bold(plan.ghcr_repository)} ${theme.muted(`(cached=${alreadyCached}, ${planMeta.slice(0, -1).join(", ")}, jobs=${options.jobs})`)}`,
   );
 
   const oci = new OciClient(plan.registry);
@@ -441,8 +441,8 @@ export async function runPush(options: PushOptions): Promise<void> {
         uploadedCount += 1;
         uploadedBytes += dumped.compressed.length;
         uploadedNarBytes += dumped.narSize;
-        console.error(
-          `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${formatStorePath(info.path, err)} ${err.dim(`(${formatBytes(dumped.compressed.length)} / ${formatBytes(dumped.narSize)} NAR)`)}`,
+        uploadEntry.line(
+          `[${uploadedCount}/${missingInfos.length}] ${formatStorePath(theme, info.path)} (${formatBytes(dumped.compressed.length)} / ${formatBytes(dumped.narSize)} NAR)`,
         );
 
         return {
@@ -466,13 +466,13 @@ export async function runPush(options: PushOptions): Promise<void> {
     );
     totalCommitted += committed.committed;
     if (totalBatches > 1) {
-      console.error(
-        `  ${err.dim(`↳ Committed batch ${batchIndex}/${totalBatches} (${committed.committed} paths)`)}`,
+      uploadEntry.line(
+        `Committed batch ${batchIndex}/${totalBatches} (${committed.committed} paths)`,
       );
     }
   }
 
-  console.log(
-    `${out.boldGreen("✓")} Committed ${out.bold(String(totalCommitted))} store paths ${out.dim(`(${formatBytes(uploadedBytes)} / ${formatBytes(uploadedNarBytes)} NAR in ${formatDurationMs(Date.now() - startedAt)})`)} to ${out.cyan(serverUrl)} ${out.dim(`(scope=${plan.scope}, owner=${plan.owner}, repo=${plan.ghcr_repository})`)}`,
+  log.success(
+    `Committed ${theme.bold(String(totalCommitted))} store paths ${theme.muted(`(${formatBytes(uploadedBytes)} / ${formatBytes(uploadedNarBytes)} NAR in ${formatDurationMs(Date.now() - startedAt)})`)} to ${theme.accent(serverUrl)} ${theme.muted(`(scope=${plan.scope}, owner=${plan.owner}, repo=${plan.ghcr_repository})`)}`,
   );
 }

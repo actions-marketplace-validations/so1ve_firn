@@ -53,6 +53,6 @@ inputs:
 
 runs:
   using: node24
-  main: action/main.mjs
-  post: action/post.mjs
+  main: action/dist/main.mjs
+  post: action/dist/post.mjs
   post-if: success()
