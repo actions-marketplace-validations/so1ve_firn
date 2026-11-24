@@ -188,8 +188,8 @@ importers:
   .:
     dependencies:
       '@clerc/plugin-completions':
-        specifier: 2.0.0-beta.1
-        version: 2.0.0-beta.1(clerc@2.0.0-beta.1)
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2(clerc@2.0.0-beta.2)
       '@hono/node-server':
         specifier: ^2.1.11
         version: 2.1.11(hono@4.13.20)
@@ -197,8 +197,8 @@ importers:
         specifier: ^0.10.0
         version: 0.10.0
       clerc:
-        specifier: 2.0.0-beta.1
-        version: 2.0.0-beta.1
+        specifier: 2.0.0-beta.2
+        version: 2.0.0-beta.2
       hono:
         specifier: ^4.13.20
         version: 4.13.20
@@ -335,19 +335,19 @@ packages:
     resolution: {integrity: sha512-tEj8X2No2A1c9NDnZECxiiJ8TP3vmFlN9tLlLeSaMqVW4tUmVG2R4qpv/eP4zymWxnymYLkLcIYVV0VcWj3RCQ==}
     engines: {node: '>= 20.12.0'}
 
-  '@clerc/logger@2.0.0-beta.1':
-    resolution: {integrity: sha512-lQlpeFgOxXkrKqbYy6qfjGxyUdV5wg9gDGlyOJcIITW1GcRNfyTjDxtI/9PnZsp1usgWmAB39n39xzO2naAEpA==}
-    engines: {node: '>=26'}
+  '@clerc/logger@2.0.0-beta.2':
+    resolution: {integrity: sha512-zLtTZ31MMDb6zHECOjR1ZdsRUwFhhwUynBoZ7ZZPHUeHMLaeYYLlWYpFyD/y3QSHVqJkRybqsufNsLQ7tt8emw==}
+    engines: {node: '>=24'}
 
-  '@clerc/plugin-completions@2.0.0-beta.1':
-    resolution: {integrity: sha512-37XkMKtIovzO3mMIUUcb1t3yOnLcmjB+Ja7stINX5TmDFjAZkF1bEA9xao92bdL/B5Ed/NmcislswamMRu8bhQ==}
-    engines: {node: '>=26'}
+  '@clerc/plugin-completions@2.0.0-beta.2':
+    resolution: {integrity: sha512-ANkXa7TTj9pWcRXm2mpgvqe2hLYijsXGofXD8sW8PTTOvF1sA10oDMEJBOPixBrz9AfosExsUffm9Eg0DQnCRw==}
+    engines: {node: '>=24'}
     peerDependencies:
       clerc: '*'
 
-  '@clerc/theme@2.0.0-beta.1':
-    resolution: {integrity: sha512-rwLz1Us+Q3bxfshW7TlEGSGjKicRbJOXcCpQJUm0itn/HsNSgcAWKLZGUvvn0KbJ8SHKtDFpCllqofn5pWhcdA==}
-    engines: {node: '>=26'}
+  '@clerc/theme@2.0.0-beta.2':
+    resolution: {integrity: sha512-mzU6aQOTjgSpwyGMoIpqqQ2j1aCDG4GBKyK/w/RvaYDsFpi+Kf9ZFp8FuCODo4PHAkwbReSi5/xWT6coxhm9QA==}
+    engines: {node: '>=24'}
 
   '@cloudflare/kv-asset-handler@0.5.1':
     resolution: {integrity: sha512-48OysfSW3MkQY1XjkhkpPkgrEkOvgfoyHzA2eyX5wpzFpijC02uWigv3hkNdJdT3C7ybW/U17yYHXeR68pLeww==}
@@ -1782,9 +1782,9 @@ packages:
   cjs-module-lexer@2.3.0:
     resolution: {integrity: sha512-lmNyBzi6iYiqyrExTctfmjd8tInx+dHu9PBomTfH5RXS53c27JMFJgzNv5TyAnm3PgGf+MLy0+Ws41/HlVxdKQ==}
 
-  clerc@2.0.0-beta.1:
-    resolution: {integrity: sha512-xIoPRkpnjzMyAjFwz/oxgVtRkQjcmzSrWQGBod9Rw4X/qpR1sNHj9Z3jT4lqX678j8QkPXrlWq58QGH6sVcKGg==}
-    engines: {node: '>=26'}
+  clerc@2.0.0-beta.2:
+    resolution: {integrity: sha512-hQZ5xo0SSHMFfQoV6lks9MW1h7+SfjPyirajJJScUrYeuDTKZPcmbsxgR5Tft3Mhe1o3tjoly3n1pJlZ9lSBPg==}
+    engines: {node: '>=24'}
 
   cloudflare@5.2.0:
     resolution: {integrity: sha512-dVzqDpPFYR9ApEC9e+JJshFJZXcw4HzM8W+3DHzO5oy9+8rLC53G7x6fEf9A7/gSuSCxuvndzui5qJKftfIM9A==}
@@ -3791,16 +3791,16 @@ snapshots:
       fast-wrap-ansi: 0.2.2
       sisteransi: 2.0.0
 
-  '@clerc/logger@2.0.0-beta.1':
+  '@clerc/logger@2.0.0-beta.2':
     dependencies:
       '@clack/prompts': 1.9.0
-      '@clerc/theme': 2.0.0-beta.1
+      '@clerc/theme': 2.0.0-beta.2
 
-  '@clerc/plugin-completions@2.0.0-beta.1(clerc@2.0.0-beta.1)':
+  '@clerc/plugin-completions@2.0.0-beta.2(clerc@2.0.0-beta.2)':
     dependencies:
-      clerc: 2.0.0-beta.1
+      clerc: 2.0.0-beta.2
 
-  '@clerc/theme@2.0.0-beta.1': {}
+  '@clerc/theme@2.0.0-beta.2': {}
 
   '@cloudflare/kv-asset-handler@0.5.1': {}
 
@@ -5042,10 +5042,10 @@ snapshots:
 
   cjs-module-lexer@2.3.0: {}
 
-  clerc@2.0.0-beta.1:
+  clerc@2.0.0-beta.2:
     dependencies:
-      '@clerc/logger': 2.0.0-beta.1
-      '@clerc/theme': 2.0.0-beta.1
+      '@clerc/logger': 2.0.0-beta.2
+      '@clerc/theme': 2.0.0-beta.2
       fast-string-width: 3.0.2
 
   cloudflare@5.2.0:

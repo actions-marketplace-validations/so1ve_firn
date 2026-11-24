@@ -156,7 +156,8 @@ const cli = clerc({
         description: "Upload paths even if signed by cache.nixos.org",
       },
       skipSignedBy: {
-        type: [String],
+        type: String,
+        multiple: true,
         default: ["cache.nixos.org-1:"],
         description: "Signature key prefix to skip (repeatable)",
       },
@@ -196,7 +197,7 @@ const cli = clerc({
       },
     },
     async run(ctx) {
-      const { theme } = ctx;
+      const { theme } = ctx.log;
       const pair = await SigningKeyPair.generate(ctx.args.name);
       const [secret, pub] = [pair.secretString(), pair.publicString()];
       if (ctx.flags.secretOut) {
@@ -219,7 +220,7 @@ const cli = clerc({
     group: "admin",
     flags: { ...adminAuthFlags, ...jsonFlag },
     async run(ctx) {
-      const { theme } = ctx;
+      const { theme } = ctx.log;
       const data = await adminRequest<AdminStatusResponse>(
         ctx.flags,
         "GET",
@@ -359,7 +360,7 @@ const cli = clerc({
       ...jsonFlag,
     },
     async run(ctx) {
-      const { theme } = ctx;
+      const { theme } = ctx.log;
       const params = new URLSearchParams({ limit: String(ctx.flags.limit) });
       if (ctx.flags.owner) {
         params.set("owner", ctx.flags.owner);
@@ -451,7 +452,7 @@ const cli = clerc({
       ...jsonFlag,
     },
     async run(ctx) {
-      const { theme } = ctx;
+      const { theme } = ctx.log;
       const prsPath = `/api/v1/admin/prs${ctx.flags.owner ? `?owner=${encodeURIComponent(ctx.flags.owner)}` : ""}`;
       if (ctx.flags.json) {
         ctx.terminal.stdout(
@@ -550,7 +551,7 @@ const cli = clerc({
     },
     flags: adminAuthFlags,
     async run(ctx) {
-      const { theme } = ctx;
+      const { theme } = ctx.log;
       const { owner, repo, number } = ctx.args;
       const res = await adminRequest<{ removed: number }>(
         ctx.flags,
@@ -576,7 +577,7 @@ const cli = clerc({
       ...jsonFlag,
     },
     async run(ctx) {
-      const { theme } = ctx;
+      const { theme } = ctx.log;
       const report: GcReport = {
         pr_paths_removed: 0,
         main_paths_removed: 0,
