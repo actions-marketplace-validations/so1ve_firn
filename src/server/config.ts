@@ -8,6 +8,7 @@ export interface RawOwnerConfig {
   github_owner_id: number;
   github_installation_id?: number | null;
   package_template?: string;
+  repo_packages?: Record<string, string>;
   manual_push_package?: string;
   main_refs?: string[];
   allowed_repos?: string[];
@@ -19,6 +20,7 @@ export interface LoadedOwner {
   githubOwnerId: number;
   githubInstallationId: number | null;
   packageTemplate: string;
+  repoPackages: Map<string, string>;
   manualPushPackage: string;
   mainRefs: string[];
   allowedRepos: Set<string>;
@@ -74,6 +76,8 @@ export interface LoadConfigOptions {
 }
 
 const OWNER_NAME_RE = /^[\w-]+$/;
+const GHCR_PACKAGE_RE =
+  /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 
 function parsePositiveInt(raw: string): number {
   const value = Number.parseInt(raw.trim(), 10);
@@ -91,6 +95,50 @@ const parseOptionalPositiveInt = (
 
 const stripTrailingSlash = (url: string): string =>
   url.trim().replace(/\/+$/, "");
+
+function parseRepoPackages(
+  ownerName: string,
+  raw: Record<string, string> | undefined,
+  allowedRepos: ReadonlySet<string>,
+): Map<string, string> {
+  const result = new Map<string, string>();
+  if (raw === undefined) {
+    return result;
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new TypeError(
+      `repo_packages for owner '${ownerName}' must be an object`,
+    );
+  }
+
+  for (const [repo, pkg] of Object.entries(raw)) {
+    const repoName = repo.trim();
+    if (!repoName) {
+      throw new Error(
+        `repo_packages for owner '${ownerName}' contains an empty repository name`,
+      );
+    }
+    if (allowedRepos.size > 0 && !allowedRepos.has(repoName)) {
+      throw new Error(
+        `repo_packages['${repoName}'] for owner '${ownerName}' is not listed in allowed_repos`,
+      );
+    }
+    if (typeof pkg !== "string") {
+      throw new TypeError(
+        `repo_packages['${repoName}'] for owner '${ownerName}' must be a string`,
+      );
+    }
+    const normalized = pkg.trim().toLowerCase();
+    if (!GHCR_PACKAGE_RE.test(normalized)) {
+      throw new Error(
+        `invalid GHCR package name '${pkg}' in repo_packages['${repoName}'] for owner '${ownerName}'`,
+      );
+    }
+    result.set(repoName, normalized);
+  }
+
+  return result;
+}
 
 function parseManualTokens(raw: string | undefined): Map<string, string[]> {
   const result = new Map<string, string[]>();
@@ -113,6 +161,7 @@ function parseManualTokens(raw: string | undefined): Map<string, string[]> {
 }
 
 export const ghcrPackageForRepo = (owner: LoadedOwner, repo: string): string =>
+  owner.repoPackages.get(repo) ??
   owner.packageTemplate.replaceAll("{repo}", repo).toLowerCase();
 
 export const ghcrRepository = (ownerName: string, pkg: string): string =>
@@ -197,17 +246,23 @@ async function buildConfig(
       throw new Error(`duplicate github_owner_id ${raw.github_owner_id}`);
     }
 
+    const allowedRepos = new Set(raw.allowed_repos);
     const loaded: LoadedOwner = {
       name: raw.name,
       ownerType: raw.owner_type ?? "user",
       githubOwnerId: raw.github_owner_id,
       githubInstallationId: raw.github_installation_id ?? null,
       packageTemplate: raw.package_template ?? "{repo}-cache",
+      repoPackages: parseRepoPackages(
+        raw.name,
+        raw.repo_packages,
+        allowedRepos,
+      ),
       manualPushPackage: (
         raw.manual_push_package ?? "manual-cache"
       ).toLowerCase(),
       mainRefs: raw.main_refs ?? ["refs/heads/main"],
-      allowedRepos: new Set(raw.allowed_repos),
+      allowedRepos,
       manualTokens: manualTokensByOwner.get(raw.name) ?? [],
     };
     ownersByName.set(loaded.name, loaded);

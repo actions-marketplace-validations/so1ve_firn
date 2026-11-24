@@ -421,7 +421,7 @@ export class GitHubPackagesClient {
   }
 
   #packageUrl(owner: string, ownerType: OwnerType, pkg: string): string {
-    return `${this.#apiUrl}/${ownerType === "org" ? "orgs" : "users"}/${owner}/packages/container/${pkg}`;
+    return `${this.#apiUrl}/${ownerType === "org" ? "orgs" : "users"}/${owner}/packages/container/${encodeURIComponent(pkg)}`;
   }
 
   public async listGhcrPackageVersionsPage(

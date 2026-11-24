@@ -78,12 +78,19 @@ Environment variables (`vars`):
     "github_owner_id": 58381667,
     "github_installation_id": 98765432,
     "package_template": "{repo}-cache",
+    "repo_packages": {
+      "nix-config": "nixos-cache"
+    },
     "manual_push_package": "manual-cache",
     "main_refs": ["refs/heads/main"],
     "allowed_repos": []
   }
 ]
 ```
+
+`repo_packages` is optional and overrides `package_template` for specific
+repositories (when `allowed_repos` is non-empty, every key in `repo_packages`
+must also be listed in `allowed_repos`).
 
 > For GHCR GC deletion, set `GITHUB_PACKAGES_TOKEN` to a GitHub **classic** PAT
 > with `read:packages` and `delete:packages` scopes (GitHub Packages REST API

@@ -27,6 +27,7 @@ import type {
   PlanResponse,
   StorePathSummary,
 } from "../shared/protocol.ts";
+import { loadConfig } from "./config.ts";
 import {
   MAIN_SCOPE,
   commitEntries,
@@ -1273,5 +1274,90 @@ describe("firn worker", () => {
       "Bearer ghp_test_classic_pat",
     ]);
     expect(store.deletedVersions).toEqual([4001]);
+  });
+
+  it("overrides GHCR package per repository via repo_packages and validates config", async () => {
+    testEnv.OWNERS_JSON = JSON.stringify([
+      {
+        name: "so1ve",
+        owner_type: "user",
+        github_owner_id: 58_381_667,
+        github_installation_id: 99,
+        repo_packages: { latchshot: "Custom-Cache" },
+      },
+    ]);
+
+    const overriddenJwt = await issueOidcJwt({ repository: "so1ve/latchshot" });
+    const defaultJwt = await issueOidcJwt({ repository: "so1ve/other" });
+
+    const overriddenPlan = await (
+      await callWorker("/api/v1/uploads/plan", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${overriddenJwt}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ store_paths: [] } satisfies PlanRequest),
+      })
+    ).json<PlanResponse>();
+    const defaultPlan = await (
+      await callWorker("/api/v1/uploads/plan", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${defaultJwt}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ store_paths: [] } satisfies PlanRequest),
+      })
+    ).json<PlanResponse>();
+
+    expect(overriddenPlan.ghcr_repository).toBe("so1ve/custom-cache");
+    expect(defaultPlan.ghcr_repository).toBe("so1ve/other-cache");
+
+    const { blobHex } = await uploadAndCommit(
+      overriddenJwt,
+      "so1ve/custom-cache",
+      "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-custom",
+      "custom-pkg-nar",
+    );
+    const narRes = await callWorker(`/nar/${blobHex}.nar.zst`);
+
+    expect(narRes.status).toBe(302);
+    expect(narRes.headers.get("location")).toContain(
+      "/cdn/so1ve/custom-cache/sha256:",
+    );
+
+    const invalidPackageEnv = {
+      ...testEnv,
+      OWNERS_JSON: JSON.stringify([
+        {
+          name: "so1ve",
+          owner_type: "user",
+          github_owner_id: 58_381_667,
+          repo_packages: { latchshot: "../escape" },
+        },
+      ]),
+    };
+
+    await expect(loadConfig(invalidPackageEnv)).rejects.toThrow(
+      /invalid GHCR package name/,
+    );
+
+    const unlistedRepoEnv = {
+      ...testEnv,
+      OWNERS_JSON: JSON.stringify([
+        {
+          name: "so1ve",
+          owner_type: "user",
+          github_owner_id: 58_381_667,
+          allowed_repos: ["other"],
+          repo_packages: { latchshot: "custom-cache" },
+        },
+      ]),
+    };
+
+    await expect(loadConfig(unlistedRepoEnv)).rejects.toThrow(
+      /not listed in allowed_repos/,
+    );
   });
 });
