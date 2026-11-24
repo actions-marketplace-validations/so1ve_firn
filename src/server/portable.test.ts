@@ -10,8 +10,11 @@ import { SigningKeyPair, unixNow } from "../shared/nix-format.ts";
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { normalizeLibsqlHttpUrl, openLibsql } from "./db/libsql.ts";
-import { applyMigrations, loadMigrations } from "./db/migrations.ts";
-import { openNodeSqlite } from "./db/sqlite.ts";
+import {
+  applyMigrations,
+  loadMigrations,
+  openNodeSqlite,
+} from "./db/sqlite.ts";
 import {
   MAIN_SCOPE,
   cacheBlobVersionIds,
@@ -52,11 +55,7 @@ describe("portable Firn server & database adapters", () => {
         {
           PUBLIC_BASE_URL: "https://cache.local",
           OWNERS_JSON: JSON.stringify([
-            {
-              name: "so1ve",
-              owner_type: "user",
-              github_owner_id: 58_381_667,
-            },
+            { name: "so1ve", owner_type: "user", github_owner_id: 58_381_667 },
           ]),
           MAIN_SIGNING_KEY: mainKey.secretString(),
           PR_SIGNING_KEY: prKey.secretString(),
@@ -130,7 +129,6 @@ describe("portable Firn server & database adapters", () => {
 
       expect(statusRes.status).toBe(200);
 
-      // Verify version_id caching, deletion, and closure-safe eviction on node:sqlite.
       await expect(
         cacheBlobVersionIds(
           db,
@@ -170,7 +168,6 @@ describe("portable Firn server & database adapters", () => {
       "http://127.0.0.1:8080",
     );
 
-    // Back a mock Hrana HTTP v2/pipeline server with an in-memory node:sqlite instance.
     const backing = openNodeSqlite(":memory:");
     let pipelineRequests = 0;
 
@@ -179,8 +176,7 @@ describe("portable Firn server & database adapters", () => {
       init?: RequestInit,
     ) => {
       const req = input instanceof Request ? input : new Request(input, init);
-      const url = new URL(req.url);
-      if (url.pathname !== "/v2/pipeline") {
+      if (new URL(req.url).pathname !== "/v2/pipeline") {
         return new Response("not found", { status: 404 });
       }
       pipelineRequests += 1;
@@ -210,22 +206,12 @@ describe("portable Firn server & database adapters", () => {
         )[];
       }>();
 
-      function decodeArg(arg: {
-        type: string;
-        value?: string;
-      }): string | number | null {
-        if (arg.type === "null") {
-          return null;
-        }
-        if (arg.type === "integer") {
-          return Number(arg.value);
-        }
-        if (arg.type === "float") {
-          return Number(arg.value);
-        }
-
-        return arg.value ?? "";
-      }
+      const decodeArg = (arg: { type: string; value?: string }) =>
+        arg.type === "null"
+          ? null
+          : arg.type === "integer" || arg.type === "float"
+            ? Number(arg.value)
+            : (arg.value ?? "");
 
       function encodeVal(val: unknown) {
         if (val === null || val === undefined) {
@@ -288,24 +274,25 @@ describe("portable Firn server & database adapters", () => {
         if (item.type === "close") {
           results.push({ type: "ok", response: { type: "close" } });
         } else if (item.type === "execute") {
-          const result = await execSql(
-            item.stmt.sql,
-            item.stmt.args,
-            item.stmt.want_rows,
-          );
           results.push({
             type: "ok",
-            response: { type: "execute", result },
+            response: {
+              type: "execute",
+              result: await execSql(
+                item.stmt.sql,
+                item.stmt.args,
+                item.stmt.want_rows,
+              ),
+            },
           });
         } else {
           const stepResults = [];
           for (const step of item.batch.steps) {
-            const upper = step.stmt.sql.trim().toUpperCase();
-            if (upper === "ROLLBACK") {
-              stepResults.push(null);
-            } else {
-              stepResults.push(await execSql(step.stmt.sql, step.stmt.args));
-            }
+            stepResults.push(
+              step.stmt.sql.trim().toUpperCase() === "ROLLBACK"
+                ? null
+                : await execSql(step.stmt.sql, step.stmt.args),
+            );
           }
           results.push({
             type: "ok",
@@ -401,14 +388,13 @@ describe("portable Firn server & database adapters", () => {
         },
       });
       try {
-        const health = await fetch(`http://127.0.0.1:${running.port}/healthz`);
+        const base = `http://127.0.0.1:${running.port}`;
+        const health = await fetch(`${base}/healthz`);
 
         expect(health.status).toBe(200);
         await expect(health.text()).resolves.toBe("ok\n");
 
-        const keys = await fetch(
-          `http://127.0.0.1:${running.port}/api/v1/public-keys`,
-        );
+        const keys = await fetch(`${base}/api/v1/public-keys`);
 
         expect(keys.status).toBe(200);
         await expect(keys.json()).resolves.toEqual({
@@ -416,21 +402,19 @@ describe("portable Firn server & database adapters", () => {
           pr_public_key: prKey.publicString(),
         });
 
-        const css = await fetch(`http://127.0.0.1:${running.port}/styles.css`);
+        const css = await fetch(`${base}/styles.css`);
 
         expect(css.status).toBe(200);
         expect(css.headers.get("content-type")).toContain("text/css");
         await expect(css.text()).resolves.toContain("--accent:");
 
-        const js = await fetch(`http://127.0.0.1:${running.port}/app.js`);
+        const js = await fetch(`${base}/app.js`);
 
         expect(js.status).toBe(200);
         expect(js.headers.get("content-type")).toContain("javascript");
         await expect(js.text()).resolves.toContain("firn_admin_token");
 
-        const icon = await fetch(
-          `http://127.0.0.1:${running.port}/favicon.svg`,
-        );
+        const icon = await fetch(`${base}/favicon.svg`);
 
         expect(icon.status).toBe(200);
         expect(icon.headers.get("content-type")).toContain("image/svg+xml");

@@ -9,13 +9,12 @@ import { Hono } from "hono";
 import { createApp } from "../server/app.ts";
 import { loadConfig } from "../server/config.ts";
 import { openLibsql } from "../server/db/libsql.ts";
-import { applyMigrations } from "../server/db/migrations.ts";
-import type { CloseableSqlDatabase } from "../server/db/sqlite.ts";
-import { openNodeSqlite } from "../server/db/sqlite.ts";
+import { applyMigrations, openNodeSqlite } from "../server/db/sqlite.ts";
+import type { CloseableSqlDatabase } from "../server/db.ts";
 import { runGc } from "../server/gc.ts";
+import { errorMessage } from "../shared/format.ts";
 
 const DEFAULT_PUBLIC_DIR = path.resolve(import.meta.dirname, "../../public");
-
 const STATIC_ASSET_PATHS = ["/styles.css", "/app.js", "/favicon.svg"] as const;
 
 const FILE_BACKED_ENV_KEYS = [
@@ -30,14 +29,17 @@ const FILE_BACKED_ENV_KEYS = [
   "LIBSQL_AUTH_TOKEN",
 ] as const;
 
-export interface NodeServerOptions {
-  host?: string | undefined;
-  port?: number | undefined;
+export interface DatabaseOptions {
   dbPath?: string | undefined;
   libsqlUrl?: string | undefined;
   libsqlAuthToken?: string | undefined;
-  gcIntervalMinutes?: number | undefined;
   env?: Record<string, string | undefined>;
+}
+
+export interface NodeServerOptions extends DatabaseOptions {
+  host?: string | undefined;
+  port?: number | undefined;
+  gcIntervalMinutes?: number | undefined;
 }
 
 export interface RunningNodeServer {
@@ -49,57 +51,46 @@ export interface RunningNodeServer {
 export function resolveEnvWithFiles(
   rawEnv: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
-  const resolved: Record<string, string | undefined> = { ...rawEnv };
+  const resolved = { ...rawEnv };
   for (const key of FILE_BACKED_ENV_KEYS) {
-    if (resolved[key]?.trim()) {
-      continue;
-    }
-    const filePath = resolved[`${key}_FILE`]?.trim();
-    if (filePath) {
-      resolved[key] = fs.readFileSync(filePath, "utf8").trim();
+    if (!resolved[key]?.trim()) {
+      const filePath = resolved[`${key}_FILE`]?.trim();
+      if (filePath) {
+        resolved[key] = fs.readFileSync(filePath, "utf8").trim();
+      }
     }
   }
 
   return resolved;
 }
 
-export function openConfiguredDatabase(options: {
-  dbPath?: string | undefined;
-  libsqlUrl?: string | undefined;
-  libsqlAuthToken?: string | undefined;
-  env?: Record<string, string | undefined>;
-}): { db: CloseableSqlDatabase; storage: string } {
+export function openConfiguredDatabase(options: DatabaseOptions): {
+  db: CloseableSqlDatabase;
+  storage: string;
+} {
   const env = resolveEnvWithFiles(options.env ?? process.env);
   const libsqlUrl = options.libsqlUrl?.trim() || env.LIBSQL_URL?.trim();
-  const libsqlAuthToken =
-    options.libsqlAuthToken?.trim() || env.LIBSQL_AUTH_TOKEN?.trim();
-  const dbPath =
-    options.dbPath?.trim() || env.FIRN_DB_PATH?.trim() || "./firn.db";
-
   if (libsqlUrl) {
     return {
-      db: openLibsql(libsqlUrl, libsqlAuthToken),
+      db: openLibsql(
+        libsqlUrl,
+        options.libsqlAuthToken?.trim() || env.LIBSQL_AUTH_TOKEN?.trim(),
+      ),
       storage: "libsql",
     };
   }
+  const dbPath =
+    options.dbPath?.trim() || env.FIRN_DB_PATH?.trim() || "./firn.db";
 
-  return {
-    db: openNodeSqlite(dbPath),
-    storage: `sqlite:${dbPath}`,
-  };
+  return { db: openNodeSqlite(dbPath), storage: `sqlite:${dbPath}` };
 }
 
-export async function runDatabaseMigrations(options: {
-  dbPath?: string | undefined;
-  libsqlUrl?: string | undefined;
-  libsqlAuthToken?: string | undefined;
-  env?: Record<string, string | undefined>;
-}): Promise<{ applied: string[]; storage: string }> {
+export async function runDatabaseMigrations(
+  options: DatabaseOptions,
+): Promise<{ applied: string[]; storage: string }> {
   const { db, storage } = openConfiguredDatabase(options);
   try {
-    const applied = await applyMigrations(db);
-
-    return { applied, storage };
+    return { applied: await applyMigrations(db), storage };
   } finally {
     db.close();
   }
@@ -115,10 +106,7 @@ export async function startNodeServer(
     options.gcIntervalMinutes ??
     Number.parseInt(env.GC_INTERVAL_MINUTES ?? "30", 10);
 
-  const config = await loadConfig(env, {
-    defaultMaxGcSubrequests: 10_000,
-  });
-
+  const config = await loadConfig(env, { defaultMaxGcSubrequests: 10_000 });
   const { db, storage } = openConfiguredDatabase({ ...options, env });
 
   const applied = await applyMigrations(db);
@@ -128,50 +116,44 @@ export async function startNodeServer(
     );
   }
 
-  const coreApp = createApp(() => ({ db, config }));
   const app = new Hono();
   const staticHandler = serveStatic({ root: DEFAULT_PUBLIC_DIR });
   for (const assetPath of STATIC_ASSET_PATHS) {
     app.use(assetPath, staticHandler);
   }
-  app.route("/", coreApp);
+  app.route(
+    "/",
+    createApp(() => ({ db, config })),
+  );
 
   let gcTimer: ReturnType<typeof setInterval> | undefined;
   let gcInFlight = false;
   if (gcIntervalMinutes > 0) {
-    gcTimer = setInterval(
-      () => {
-        if (gcInFlight) {
-          return;
-        }
-        gcInFlight = true;
-        void runGc(db, config, false)
-          .catch((error: unknown) => {
-            console.error(
-              JSON.stringify({
-                message: "scheduled GC failed",
-                error: error instanceof Error ? error.message : String(error),
-              }),
-            );
-          })
-          .finally(() => {
-            gcInFlight = false;
-          });
-      },
-      gcIntervalMinutes * 60 * 1000,
-    );
+    gcTimer = setInterval(() => {
+      if (gcInFlight) {
+        return;
+      }
+      gcInFlight = true;
+      void runGc(db, config, false)
+        .catch((error: unknown) => {
+          console.error(
+            JSON.stringify({
+              message: "scheduled GC failed",
+              error: errorMessage(error),
+            }),
+          );
+        })
+        .finally(() => {
+          gcInFlight = false;
+        });
+    }, gcIntervalMinutes * 60_000);
     gcTimer.unref();
   }
 
   const server = await new Promise<ReturnType<typeof serve>>(
     (resolve, reject) => {
-      const instance = serve(
-        {
-          fetch: app.fetch,
-          hostname: host,
-          port,
-        },
-        () => resolve(instance),
+      const instance = serve({ fetch: app.fetch, hostname: host, port }, () =>
+        resolve(instance),
       );
       instance.once("error", reject);
     },
@@ -195,7 +177,7 @@ export async function startNodeServer(
   return {
     host,
     port: actualPort,
-    close(): Promise<void> {
+    close: () => {
       clearInterval(gcTimer);
 
       return new Promise((resolve, reject) => {

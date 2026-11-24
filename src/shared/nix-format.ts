@@ -1,5 +1,7 @@
 const NIX_BASE32_ALPHABET = "0123456789abcdfghijklmnpqrsvwxyz";
+const NIX_BASE32_RE = /^[0-9a-df-np-sv-z]+$/;
 const STORE_PREFIX = "/nix/store/";
+const encoder = new TextEncoder();
 
 // RFC 8410 PKCS#8 PrivateKeyInfo prefix for a 32-byte Ed25519 seed.
 const ED25519_PKCS8_PREFIX = new Uint8Array([
@@ -40,16 +42,6 @@ export function base64ToBytes(encoded: string): Uint8Array {
   return out;
 }
 
-function isNixBase32(value: string): boolean {
-  for (const element of value) {
-    if (!NIX_BASE32_ALPHABET.includes(element)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 function validateKeyName(name: string): void {
   if (!name || name.includes(":") || /\s/.test(name)) {
     throw new Error(`invalid Nix key name '${name}'`);
@@ -67,10 +59,9 @@ export function encodeHex(bytes: Uint8Array): string {
   return out;
 }
 
-export function encodeNixBase32(bytes: Uint8Array): string {
+function encodeNixBase32(bytes: Uint8Array): string {
   const outLen = Math.floor((bytes.length * 8 - 1) / 5) + 1;
   let out = "";
-
   for (let n = outLen - 1; n >= 0; n--) {
     const bitPos = n * 5;
     const byteIdx = bitPos >> 3;
@@ -100,17 +91,17 @@ export function validateSha256Hex(value: string): void {
 }
 
 export function validateSha256NixBase32(value: string): void {
-  if (!value.startsWith("sha256:")) {
-    throw new Error(`expected sha256:<nixbase32>, got '${value}'`);
-  }
-  const rest = value.slice("sha256:".length);
-  if (rest.length !== 52 || !isNixBase32(rest)) {
+  if (
+    !value.startsWith("sha256:") ||
+    value.length !== 59 ||
+    !NIX_BASE32_RE.test(value.slice(7))
+  ) {
     throw new Error(`invalid sha256 nixbase32 digest '${value}'`);
   }
 }
 
 export function validateStoreHash(hash: string): void {
-  if (hash.length !== 32 || !isNixBase32(hash)) {
+  if (hash.length !== 32 || !NIX_BASE32_RE.test(hash)) {
     throw new Error(`invalid Nix store hash '${hash}'`);
   }
 }
@@ -140,9 +131,7 @@ export function normalizeReferences(references: readonly string[]): string[] {
     ),
   );
 
-  normalized.sort();
-
-  return [...new Set(normalized)];
+  return [...new Set(normalized.sort())];
 }
 
 export function fingerprint(
@@ -171,11 +160,9 @@ export function renderNarInfo(info: NarInfo): string {
     `NarHash: ${info.narHash}`,
     `NarSize: ${info.narSize}`,
     `References: ${info.references.join(" ")}`,
+    ...(info.deriver ? [`Deriver: ${info.deriver}`] : []),
+    `Sig: ${info.sig}`,
   ];
-  if (info.deriver) {
-    lines.push(`Deriver: ${info.deriver}`);
-  }
-  lines.push(`Sig: ${info.sig}`);
 
   return `${lines.join("\n")}\n`;
 }
@@ -207,12 +194,16 @@ export class SigningKeyPair {
     const pkcs8 = new Uint8Array(
       (await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer,
     );
-    const seed = pkcs8.slice(-32);
     const publicBytes = new Uint8Array(
       (await crypto.subtle.exportKey("raw", pair.publicKey)) as ArrayBuffer,
     );
 
-    return new SigningKeyPair(name, pair.privateKey, seed, publicBytes);
+    return new SigningKeyPair(
+      name,
+      pair.privateKey,
+      pkcs8.slice(-32),
+      publicBytes,
+    );
   }
 
   public static async parseSecret(raw: string): Promise<SigningKeyPair> {
@@ -222,10 +213,9 @@ export class SigningKeyPair {
       throw new Error("invalid Nix secret key: missing ':' separator");
     }
     const name = trimmed.slice(0, sep);
-    const encoded = trimmed.slice(sep + 1);
     validateKeyName(name);
 
-    const bytes = base64ToBytes(encoded);
+    const bytes = base64ToBytes(trimmed.slice(sep + 1));
     if (bytes.length !== 64) {
       throw new Error(
         `invalid Nix secret key length: expected 64 bytes, got ${bytes.length}`,
@@ -233,8 +223,6 @@ export class SigningKeyPair {
     }
 
     const seed = bytes.slice(0, 32);
-    const publicBytes = bytes.slice(32, 64);
-
     const pkcs8 = new Uint8Array(ED25519_PKCS8_PREFIX.length + 32);
     pkcs8.set(ED25519_PKCS8_PREFIX, 0);
     pkcs8.set(seed, ED25519_PKCS8_PREFIX.length);
@@ -247,7 +235,7 @@ export class SigningKeyPair {
       ["sign"],
     );
 
-    return new SigningKeyPair(name, privateKey, seed, publicBytes);
+    return new SigningKeyPair(name, privateKey, seed, bytes.slice(32, 64));
   }
 
   public secretString(): string {
@@ -263,9 +251,8 @@ export class SigningKeyPair {
   }
 
   public async signFingerprint(fp: string): Promise<string> {
-    const data = new TextEncoder().encode(fp);
     const sig = new Uint8Array(
-      await crypto.subtle.sign("Ed25519", this.#privateKey, data),
+      await crypto.subtle.sign("Ed25519", this.#privateKey, encoder.encode(fp)),
     );
 
     return `${this.name}:${bytesToBase64(sig)}`;
@@ -277,10 +264,8 @@ export async function verifySignature(
   fp: string,
   signature: string,
 ): Promise<boolean> {
-  const trimmedKey = publicKey.trim();
-  const trimmedSig = signature.trim();
-  const keySep = trimmedKey.indexOf(":");
-  const sigSep = trimmedSig.indexOf(":");
+  const [trimmedKey, trimmedSig] = [publicKey.trim(), signature.trim()];
+  const [keySep, sigSep] = [trimmedKey.indexOf(":"), trimmedSig.indexOf(":")];
   if (keySep === -1 || sigSep === -1) {
     throw new Error("invalid Nix key or signature format");
   }
@@ -298,10 +283,5 @@ export async function verifySignature(
     "verify",
   ]);
 
-  return crypto.subtle.verify(
-    "Ed25519",
-    key,
-    sigBytes,
-    new TextEncoder().encode(fp),
-  );
+  return crypto.subtle.verify("Ed25519", key, sigBytes, encoder.encode(fp));
 }

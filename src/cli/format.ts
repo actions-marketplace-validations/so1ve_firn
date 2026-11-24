@@ -22,16 +22,16 @@ export function createStyler(stream: NodeJS.WriteStream = process.stdout) {
     styleText(style, text, { stream });
 
   return {
-    bold: (text: string) => paint("bold", text),
-    dim: (text: string) => paint("dim", text),
-    cyan: (text: string) => paint("cyan", text),
-    boldCyan: (text: string) => paint(["bold", "cyan"], text),
-    green: (text: string) => paint("green", text),
-    boldGreen: (text: string) => paint(["bold", "green"], text),
-    yellow: (text: string) => paint("yellow", text),
-    boldYellow: (text: string) => paint(["bold", "yellow"], text),
-    red: (text: string) => paint("red", text),
-    boldRed: (text: string) => paint(["bold", "red"], text),
+    bold: (t: string) => paint("bold", t),
+    dim: (t: string) => paint("dim", t),
+    cyan: (t: string) => paint("cyan", t),
+    boldCyan: (t: string) => paint(["bold", "cyan"], t),
+    green: (t: string) => paint("green", t),
+    boldGreen: (t: string) => paint(["bold", "green"], t),
+    yellow: (t: string) => paint("yellow", t),
+    boldYellow: (t: string) => paint(["bold", "yellow"], t),
+    red: (t: string) => paint("red", t),
+    boldRed: (t: string) => paint(["bold", "red"], t),
   };
 }
 
@@ -40,13 +40,12 @@ export const err = createStyler(process.stderr);
 
 export function formatStorePath(storePath: string, styler = out): string {
   const { hash, name } = splitStorePath(storePath);
-  if (hash) {
-    const prefix = storePath.startsWith("/nix/store/") ? "/nix/store/" : "";
-
-    return `${styler.dim(`${prefix}${hash}-`)}${name}`;
+  if (!hash) {
+    return storePath;
   }
+  const prefix = storePath.startsWith("/nix/store/") ? "/nix/store/" : "";
 
-  return storePath;
+  return `${styler.dim(`${prefix}${hash}-`)}${name}`;
 }
 
 export const formatScope = (scope: string): string =>
@@ -60,23 +59,20 @@ function padCell(
   width: number,
   align: "left" | "right" = "left",
 ): string {
-  const gap = Math.max(0, width - visibleLength(text));
-  const spaces = " ".repeat(gap);
+  const spaces = " ".repeat(Math.max(0, width - visibleLength(text)));
 
   return align === "right" ? `${spaces}${text}` : `${text}${spaces}`;
 }
 
-export function renderBanner(title: string, subtitle?: string): string {
-  const head = `${out.boldCyan("◆")} ${out.bold(title)}`;
+export const renderBanner = (title: string, subtitle?: string): string =>
+  subtitle
+    ? `${out.boldCyan("◆")} ${out.bold(title)}  ${out.dim(subtitle)}`
+    : `${out.boldCyan("◆")} ${out.bold(title)}`;
 
-  return subtitle ? `${head}  ${out.dim(subtitle)}` : head;
-}
-
-export function renderSection(title: string, subtitle?: string): string {
-  const label = `${out.cyan("▸")} ${out.bold(title)}`;
-
-  return subtitle ? `\n${label} ${out.dim(subtitle)}` : `\n${label}`;
-}
+export const renderSection = (title: string, subtitle?: string): string =>
+  subtitle
+    ? `\n${out.cyan("▸")} ${out.bold(title)} ${out.dim(subtitle)}`
+    : `\n${out.cyan("▸")} ${out.bold(title)}`;
 
 export function renderKv(
   entries: readonly [label: string, value: string][],
@@ -88,13 +84,10 @@ export function renderKv(
   );
 
   return entries
-    .map(([label, value]) => {
-      const padded = padCell(label, maxLabel + 2);
-      const styled =
-        visibleLength(label) === label.length ? out.dim(padded) : padded;
-
-      return `${indent}${styled}${value}`;
-    })
+    .map(
+      ([label, value]) =>
+        `${indent}${out.dim(padCell(label, maxLabel + 2))}${value}`,
+    )
     .join("\n");
 }
 
@@ -103,39 +96,29 @@ export function renderTable<T>(
   rows: readonly T[],
   indent = "  ",
 ): string {
-  const renderedRows = rows.map((row) =>
-    columns.map((column) => column.value(row)),
-  );
-  const widths = columns.map((column, colIndex) =>
+  const renderedRows = rows.map((row) => columns.map((col) => col.value(row)));
+  const widths = columns.map((col, i) =>
     Math.max(
-      visibleLength(column.header),
-      ...renderedRows.map((row) => visibleLength(row[colIndex])),
+      visibleLength(col.header),
+      ...renderedRows.map((row) => visibleLength(row[i])),
     ),
   );
   const lastCol = columns.length - 1;
-
   const formatCell = (
     text: string,
     idx: number,
-    align: "left" | "right" | undefined,
+    align?: "left" | "right",
   ): string =>
     idx === lastCol && align !== "right"
       ? text
       : padCell(text, widths[idx], align);
 
-  const headerLine = columns
-    .map((column, idx) => out.dim(formatCell(column.header, idx, column.align)))
-    .join("  ");
-  const ruleLine = out.dim(widths.map((width) => "─".repeat(width)).join("  "));
-  const bodyLines = renderedRows.map((row) =>
-    row
-      .map((cell, idx) => formatCell(cell, idx, columns[idx].align))
-      .join("  "),
-  );
-
   return [
-    `${indent}${headerLine}`,
-    `${indent}${ruleLine}`,
-    ...bodyLines.map((line) => `${indent}${line}`),
+    `${indent}${columns.map((col, i) => out.dim(formatCell(col.header, i, col.align))).join("  ")}`,
+    `${indent}${out.dim(widths.map((w) => "─".repeat(w)).join("  "))}`,
+    ...renderedRows.map(
+      (row) =>
+        `${indent}${row.map((cell, i) => formatCell(cell, i, columns[i].align)).join("  ")}`,
+    ),
   ].join("\n");
 }

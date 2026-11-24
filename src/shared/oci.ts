@@ -4,37 +4,14 @@ const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
 const OCI_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json";
 const NAR_LAYER_MEDIA_TYPE = "application/vnd.firn.nix.nar.zstd";
 
-// SHA-256 of "{}"
-const EMPTY_CONFIG_BYTES = new TextEncoder().encode("{}");
+const encoder = new TextEncoder();
+const EMPTY_CONFIG_BYTES = encoder.encode("{}");
 const EMPTY_CONFIG_DIGEST =
   "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
 
 const MAX_RETRIES = 6;
 const BASE_RETRY_DELAY_MS = 200;
 const MAX_RETRY_DELAY_MS = 15_000;
-
-interface TokenResponse {
-  token?: string;
-  access_token?: string;
-}
-
-interface OciManifest {
-  layers?: { digest: string; size: number }[];
-}
-
-async function sha256DigestPrefixed(bytes: Uint8Array): Promise<string> {
-  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-
-  return `sha256:${encodeHex(hash)}`;
-}
-
-const isRetryableStatus = (status: number): boolean =>
-  status === 408 ||
-  status === 429 ||
-  status === 500 ||
-  status === 502 ||
-  status === 503 ||
-  status === 504;
 
 const RETRY_UNIT_MS: Record<string, number> = {
   m: 60_000,
@@ -44,6 +21,22 @@ const RETRY_UNIT_MS: Record<string, number> = {
   µs: 0.001,
   ns: 0.000001,
 };
+
+const isRetryableStatus = (status: number): boolean =>
+  status === 408 ||
+  status === 429 ||
+  status === 500 ||
+  status === 502 ||
+  status === 503 ||
+  status === 504;
+
+const isRedirect = (status: number): boolean => status >= 300 && status < 400;
+
+const readBody = (response: Response): Promise<string> =>
+  response.text().catch(() => "");
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 function parseRetryDelayMs(
   response: Response,
@@ -75,15 +68,12 @@ function parseRetryDelayMs(
   }
 
   const exp = Math.min(BASE_RETRY_DELAY_MS * 2 ** attempt, MAX_RETRY_DELAY_MS);
-  const jitter = Math.floor(Math.random() * Math.min(exp, 500));
 
-  return Math.min(exp + jitter, MAX_RETRY_DELAY_MS);
+  return Math.min(
+    exp + Math.floor(Math.random() * Math.min(exp, 500)),
+    MAX_RETRY_DELAY_MS,
+  );
 }
-
-const sleep = async (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 
 export class OciHttpError extends Error {
   public readonly status: number;
@@ -110,10 +100,9 @@ export class OciClient {
       if (!isRetryableStatus(response.status) || attempt >= MAX_RETRIES) {
         return response;
       }
-
-      const body = await response.text().catch(() => "");
-      const delayMs = parseRetryDelayMs(response, body, attempt);
-      await sleep(delayMs);
+      await sleep(
+        parseRetryDelayMs(response, await readBody(response), attempt),
+      );
     }
   }
 
@@ -127,22 +116,22 @@ export class OciClient {
       scope: `repository:${repository}:${scopeAction}`,
     });
     const url = `${this.#registryUrl}/token?${params.toString()}`;
-    const headers: Record<string, string> = {};
-    if (basicAuth) {
-      headers.Authorization = `Basic ${btoa(`${basicAuth[0]}:${basicAuth[1]}`)}`;
-    }
+    const headers: Record<string, string> = basicAuth
+      ? { Authorization: `Basic ${btoa(`${basicAuth[0]}:${basicAuth[1]}`)}` }
+      : {};
 
     const response = await this.#fetchWithRetry(url, { headers });
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-
       throw new OciHttpError(
         response.status,
-        `OCI token exchange at ${url} failed (${response.status}): ${body}`,
+        `OCI token exchange at ${url} failed (${response.status}): ${await readBody(response)}`,
       );
     }
 
-    const data = await response.json<TokenResponse>();
+    const data = await response.json<{
+      token?: string;
+      access_token?: string;
+    }>();
     const token = data.token || data.access_token;
     if (!token) {
       throw new Error(`OCI token response from ${url} did not contain a token`);
@@ -166,14 +155,14 @@ export class OciClient {
       },
     });
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-
       throw new Error(
-        `manifest ${manifestDigest} not found in ${repository} (${response.status}): ${body}`,
+        `manifest ${manifestDigest} not found in ${repository} (${response.status}): ${await readBody(response)}`,
       );
     }
 
-    const manifest = await response.json<OciManifest>();
+    const manifest = await response.json<{
+      layers?: { digest: string; size: number }[];
+    }>();
     const expectedLayerDigest = `sha256:${blobDigestHex.toLowerCase()}`;
     const found = (manifest.layers ?? []).some(
       (layer) =>
@@ -198,14 +187,13 @@ export class OciClient {
     blobDigestHex: string,
     pullToken: string,
   ): Promise<string> {
-    const digest = `sha256:${blobDigestHex.toLowerCase()}`;
-    const blobUrl = `${this.#registryUrl}/v2/${repository}/blobs/${digest}`;
+    const blobUrl = `${this.#registryUrl}/v2/${repository}/blobs/sha256:${blobDigestHex.toLowerCase()}`;
     const response = await this.#fetchWithRetry(blobUrl, {
       headers: { Authorization: `Bearer ${pullToken}` },
       redirect: "manual",
     });
 
-    if (response.status >= 300 && response.status < 400) {
+    if (isRedirect(response.status)) {
       const location = response.headers.get("location");
       if (!location) {
         throw new Error(
@@ -223,17 +211,19 @@ export class OciClient {
 
   async #blobExists(
     repository: string,
-    pushToken: string,
+    token: string,
     digest: string,
   ): Promise<boolean> {
-    const url = `${this.#registryUrl}/v2/${repository}/blobs/${digest}`;
-    const response = await this.#fetchWithRetry(url, {
-      method: "HEAD",
-      headers: { Authorization: `Bearer ${pushToken}` },
-      redirect: "manual",
-    });
+    const response = await this.#fetchWithRetry(
+      `${this.#registryUrl}/v2/${repository}/blobs/${digest}`,
+      {
+        method: "HEAD",
+        headers: { Authorization: `Bearer ${token}` },
+        redirect: "manual",
+      },
+    );
 
-    return response.ok || (response.status >= 300 && response.status < 400);
+    return response.ok || isRedirect(response.status);
   }
 
   async #putBlob(
@@ -256,10 +246,8 @@ export class OciClient {
         },
       });
       if (start.status !== 202 && !start.ok) {
-        const body = await start.text().catch(() => "");
-
         throw new Error(
-          `failed to initiate blob upload to ${startUrl} (${start.status}): ${body}`,
+          `failed to initiate blob upload to ${startUrl} (${start.status}): ${await readBody(start)}`,
         );
       }
 
@@ -285,7 +273,7 @@ export class OciClient {
         return;
       }
 
-      const body = await put.text().catch(() => "");
+      const body = await readBody(put);
       if (isRetryableStatus(put.status) && attempt < MAX_RETRIES) {
         await sleep(parseRetryDelayMs(put, body, attempt));
 
@@ -329,7 +317,7 @@ export class OciClient {
     await this.#ensureEmptyConfig(repository, pushToken);
     await this.#putBlob(repository, pushToken, blobDigest, payload);
 
-    const manifestBytes = new TextEncoder().encode(
+    const manifestBytes = encoder.encode(
       JSON.stringify({
         schemaVersion: 2,
         mediaType: OCI_MANIFEST_MEDIA_TYPE,
@@ -348,8 +336,7 @@ export class OciClient {
       }),
     );
 
-    const tag = `nar-${blobDigestHex.toLowerCase().slice(0, 32)}`;
-    const manifestUrl = `${this.#registryUrl}/v2/${repository}/manifests/${tag}`;
+    const manifestUrl = `${this.#registryUrl}/v2/${repository}/manifests/nar-${blobDigestHex.toLowerCase().slice(0, 32)}`;
     const response = await this.#fetchWithRetry(manifestUrl, {
       method: "PUT",
       headers: {
@@ -359,16 +346,19 @@ export class OciClient {
       body: manifestBytes,
     });
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-
       throw new Error(
-        `failed to push manifest to ${manifestUrl} (${response.status}): ${body}`,
+        `failed to push manifest to ${manifestUrl} (${response.status}): ${await readBody(response)}`,
       );
     }
 
-    return (
-      response.headers.get("docker-content-digest") ??
-      (await sha256DigestPrefixed(manifestBytes))
+    const digestHeader = response.headers.get("docker-content-digest");
+    if (digestHeader) {
+      return digestHeader;
+    }
+    const hash = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", manifestBytes),
     );
+
+    return `sha256:${encodeHex(hash)}`;
   }
 }

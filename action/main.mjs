@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  errorMessage,
   exportEnv,
   getInput,
   listStoreEntries,
@@ -15,7 +16,6 @@ async function resolvePublicKeys(server, mainKeyInput, prKeyInput) {
   if (mainKeyInput && prKeyInput) {
     return { mainKey: mainKeyInput, prKey: prKeyInput };
   }
-
   const url = `${server}/api/v1/public-keys`;
   try {
     const response = await fetch(url);
@@ -34,7 +34,7 @@ async function resolvePublicKeys(server, mainKeyInput, prKeyInput) {
     };
   } catch (error) {
     console.log(
-      `::warning::Failed to fetch public keys from ${url}: ${error instanceof Error ? error.message : String(error)}`,
+      `::warning::Failed to fetch public keys from ${url}: ${errorMessage(error)}`,
     );
 
     return { mainKey: mainKeyInput, prKey: prKeyInput };
@@ -56,16 +56,16 @@ function configureNix(server, mainKey, prKey, { isPr, prNumber, isForkPr }) {
     process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
   const nixConfPath = path.join(configHome, "nix", "nix.conf");
   fs.mkdirSync(path.dirname(nixConfPath), { recursive: true });
-
-  const block = [
-    "",
-    "# Configured by firn-action",
-    `extra-substituters = ${substituter}`,
-    `extra-trusted-public-keys = ${keys.join(" ")}`,
-    "",
-  ].join("\n");
-  fs.appendFileSync(nixConfPath, block);
+  fs.appendFileSync(
+    nixConfPath,
+    `\n# Configured by firn-action\nextra-substituters = ${substituter}\nextra-trusted-public-keys = ${keys.join(" ")}\n`,
+  );
   console.log(`Configured Nix substituter: ${substituter}`);
+}
+
+function skipPush(message) {
+  console.log(message);
+  saveState("should_push", "false");
 }
 
 async function main() {
@@ -79,9 +79,6 @@ async function main() {
     getInput("main-public-key"),
     getInput("pr-public-key"),
   );
-  const pushEnabled = getInput("push").toLowerCase() !== "false";
-  const token = getInput("token");
-
   const eventName = process.env.GITHUB_EVENT_NAME || "";
   const event = readEventPayload();
   const isPr = eventName === "pull_request";
@@ -93,37 +90,24 @@ async function main() {
 
   configureNix(server, mainKey, prKey, { isPr, prNumber, isForkPr });
 
-  if (!pushEnabled) {
-    console.log("Cache push disabled by input 'push: false'");
-    saveState("should_push", "false");
-
-    return;
+  if (getInput("push").toLowerCase() === "false") {
+    return skipPush("Cache push disabled by input 'push: false'");
   }
-
   if (eventName === "pull_request_target") {
-    console.log("::notice::Skipping Firn cache push on pull_request_target");
-    saveState("should_push", "false");
-
-    return;
+    return skipPush(
+      "::notice::Skipping Firn cache push on pull_request_target",
+    );
   }
-
   if (isForkPr) {
-    console.log("::notice::Skipping Firn cache push for fork pull request");
-    saveState("should_push", "false");
-
-    return;
+    return skipPush("::notice::Skipping Firn cache push for fork pull request");
   }
-
   const hasOidc =
     Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_URL) &&
     Boolean(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN);
-  if (!token && !hasOidc) {
-    console.log(
+  if (!getInput("token") && !hasOidc) {
+    return skipPush(
       "::warning::Skipping Firn cache push: neither 'token' nor GitHub Actions OIDC (permissions: id-token: write) is available",
     );
-    saveState("should_push", "false");
-
-    return;
   }
 
   const pathsFile =
@@ -151,8 +135,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(
-    `::error::${error instanceof Error ? error.message : String(error)}`,
-  );
+  console.error(`::error::${errorMessage(error)}`);
   process.exit(1);
 });

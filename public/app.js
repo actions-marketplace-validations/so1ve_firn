@@ -1,15 +1,49 @@
 (() => {
   const TOKEN_KEY = "firn_admin_token";
-
+  const MAX_UI_GC_ROUNDS = 200;
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => root.querySelectorAll(sel);
   const getToken = () => sessionStorage.getItem(TOKEN_KEY) || "";
+  const errMsg = (e) => (e instanceof Error ? e.message : String(e));
+
+  function h(tag, attrs, ...children) {
+    const el = document.createElement(tag);
+    if (attrs) {
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v !== undefined && v !== null) {
+          if (
+            k === "className" ||
+            k === "hidden" ||
+            k === "colSpan" ||
+            k === "type" ||
+            k === "href" ||
+            k === "target" ||
+            k === "rel" ||
+            k === "title"
+          ) {
+            el[k] = v;
+          } else {
+            el.setAttribute(k, v);
+          }
+        }
+      }
+    }
+    for (const child of children) {
+      if (child !== null && child !== undefined && child !== false) {
+        el.append(child);
+      }
+    }
+
+    return el;
+  }
 
   function setAdminUi(unlocked) {
-    for (const el of document.querySelectorAll(".admin-only")) {
+    for (const el of $$(".admin-only")) {
       el.hidden = !unlocked;
     }
-    const toggleBtn = document.querySelector("#admin-toggle-btn");
-    const loginForm = document.querySelector("#admin-login-form");
-    const activeControls = document.querySelector("#admin-active-controls");
+    const toggleBtn = $("#admin-toggle-btn");
+    const loginForm = $("#admin-login-form");
+    const activeControls = $("#admin-active-controls");
     if (toggleBtn) {
       toggleBtn.hidden = unlocked;
       toggleBtn.setAttribute("aria-expanded", "false");
@@ -23,13 +57,40 @@
   }
 
   function showNotice(id, text, kind) {
-    const el = document.querySelector(`#${id}`);
-    if (!el) {
-      return;
+    const el = $(`#${id}`);
+    if (el) {
+      el.hidden = !text;
+      el.textContent = text;
+      el.className = `notice${kind ? ` ${kind}` : ""}`;
     }
-    el.hidden = !text;
-    el.textContent = text;
-    el.className = `notice${kind ? ` ${kind}` : ""}`;
+  }
+
+  async function adminFetch(url, method) {
+    const res = await fetch(url, {
+      method,
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!res.ok) {
+      throw new Error(await res.text());
+    }
+
+    return res.json();
+  }
+
+  function armConfirm(btn, confirmLabel, idleLabel) {
+    if (btn.getAttribute("data-armed") === "true") {
+      return true;
+    }
+    btn.setAttribute("data-armed", "true");
+    btn.textContent = confirmLabel;
+    setTimeout(() => {
+      if (btn.isConnected && btn.getAttribute("data-armed") === "true") {
+        btn.removeAttribute("data-armed");
+        btn.textContent = idleLabel;
+      }
+    }, 4000);
+
+    return false;
   }
 
   function formatBytes(bytes) {
@@ -45,49 +106,36 @@
   }
 
   function formatAge(ts) {
-    const delta = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-    if (delta < 60) {
-      return `${delta}s ago`;
+    const d = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (d < 60) {
+      return `${d}s ago`;
     }
-    if (delta < 3600) {
-      return `${Math.floor(delta / 60)}m ago`;
+    if (d < 3600) {
+      return `${Math.floor(d / 60)}m ago`;
     }
-    if (delta < 86_400) {
-      return `${Math.floor(delta / 3600)}h ago`;
+    if (d < 86_400) {
+      return `${Math.floor(d / 3600)}h ago`;
     }
 
-    return `${Math.floor(delta / 86_400)}d ago`;
+    return `${Math.floor(d / 86_400)}d ago`;
   }
 
   function splitStorePath(storePath) {
     const base = storePath.startsWith("/nix/store/")
       ? storePath.slice(11)
       : storePath;
-    if (base.length > 33 && base[32] === "-") {
-      return { hash: base.slice(0, 32), name: base.slice(33) };
-    }
 
-    return { hash: "", name: base };
+    return base.length > 33 && base[32] === "-"
+      ? { hash: base.slice(0, 32), name: base.slice(33) }
+      : { hash: "", name: base };
   }
 
-  function parsePrScope(scope) {
-    const match = /^pr:([^:]+):([^:]+):(\d+)$/.exec(scope);
-    if (!match) {
-      return null;
-    }
-
-    return { owner: match[1], repo: match[2], number: match[3] };
-  }
-
-  function extLink(href, text) {
-    const a = document.createElement("a");
-    a.href = href;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.textContent = text;
-
-    return a;
-  }
+  const extLink = (href, text, className) =>
+    h(
+      "a",
+      { href, target: "_blank", rel: "noopener noreferrer", className },
+      text,
+    );
 
   // Copy buttons
   document.addEventListener("click", async (event) => {
@@ -95,9 +143,8 @@
     if (!btn) {
       return;
     }
-    const text = btn.getAttribute("data-copy") || "";
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(btn.getAttribute("data-copy") || "");
       const prev = btn.textContent;
       btn.textContent = prev === prev.toLowerCase() ? "copied" : "Copied";
       setTimeout(() => {
@@ -108,40 +155,53 @@
     }
   });
 
-  // Snippet tabs + shared Copy button
-  const snippetCopyBtn = document.querySelector("#snippet-copy-btn");
-  for (const btn of document.querySelectorAll(".tab-btn")) {
+  // Snippet tabs
+  const snippetCopyBtn = $("#snippet-copy-btn");
+  for (const btn of $$(".tab-btn")) {
     btn.addEventListener("click", () => {
       const target = btn.getAttribute("data-tab");
-      for (const other of document.querySelectorAll(".tab-btn")) {
+      for (const other of $$(".tab-btn")) {
         other.setAttribute("aria-selected", String(other === btn));
       }
-      for (const panel of document.querySelectorAll("[data-panel]")) {
+      for (const panel of $$("[data-panel]")) {
         const active = panel.getAttribute("data-panel") === target;
         panel.hidden = !active;
-        if (active && snippetCopyBtn) {
-          snippetCopyBtn.setAttribute(
-            "data-copy",
-            panel.getAttribute("data-snippet") || "",
-          );
+        const pre = panel.querySelector("pre");
+        if (active && snippetCopyBtn && pre) {
+          snippetCopyBtn.setAttribute("data-copy", pre.textContent || "");
         }
       }
     });
   }
 
   // Live store paths filter & sort
-  const searchInput = document.querySelector("#filter-q");
-  const ownerSelect = document.querySelector("#filter-owner");
-  const scopeSelect = document.querySelector("#filter-scope");
-  const limitSelect = document.querySelector("#filter-limit");
-  const deleteMatchingBtn = document.querySelector("#delete-matching-btn");
-  const sortButtons = document.querySelectorAll(".sort-btn[data-sort]");
-  const pathsBody = document.querySelector("#paths-body");
-  const pathsStatus = document.querySelector("#paths-status");
+  const searchInput = $("#filter-q");
+  const ownerSelect = $("#filter-owner");
+  const scopeSelect = $("#filter-scope");
+  const limitSelect = $("#filter-limit");
+  const deleteMatchingBtn = $("#delete-matching-btn");
+  const sortButtons = $$(".sort-btn[data-sort]");
+  const pathsBody = $("#paths-body");
+  const pathsStatus = $("#paths-status");
 
   let currentSort = "accessed";
   let filterTimer = null;
   let activeController = null;
+
+  function buildFilterParams() {
+    const params = new URLSearchParams();
+    if (searchInput.value.trim()) {
+      params.set("q", searchInput.value.trim());
+    }
+    if (ownerSelect.value) {
+      params.set("owner", ownerSelect.value);
+    }
+    if (scopeSelect.value) {
+      params.set("scope", scopeSelect.value);
+    }
+
+    return params;
+  }
 
   function syncDeleteMatchingState() {
     if (!deleteMatchingBtn) {
@@ -167,24 +227,23 @@
         await res.text(),
         "text/html",
       );
-      const unlocked = Boolean(getToken());
       for (const selector of [
         ".summary-line",
         'section[aria-labelledby="prs-heading"]',
         'section[aria-labelledby="owners-heading"]',
       ]) {
-        const cur = document.querySelector(selector);
-        const next = doc.querySelector(selector);
+        const cur = $(selector);
+        const next = $(selector, doc);
         if (cur && next) {
           cur.replaceWith(next);
         }
       }
-      if (unlocked) {
-        for (const el of document.querySelectorAll(".admin-only")) {
+      if (getToken()) {
+        for (const el of $$(".admin-only")) {
           el.hidden = false;
         }
       }
-      const nextScope = doc.querySelector("#filter-scope");
+      const nextScope = $("#filter-scope", doc);
       if (scopeSelect && nextScope) {
         const selected = scopeSelect.value;
         scopeSelect.replaceChildren(...nextScope.children);
@@ -205,16 +264,7 @@
     }
     activeController = new AbortController();
 
-    const params = new URLSearchParams();
-    if (searchInput.value.trim()) {
-      params.set("q", searchInput.value.trim());
-    }
-    if (ownerSelect.value) {
-      params.set("owner", ownerSelect.value);
-    }
-    if (scopeSelect.value) {
-      params.set("scope", scopeSelect.value);
-    }
+    const params = buildFilterParams();
     if (limitSelect.value) {
       params.set("limit", limitSelect.value);
     }
@@ -232,104 +282,114 @@
       }
       const items = await res.json();
 
-      pathsBody.replaceChildren();
       if (items.length === 0) {
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 5;
-        td.className = "empty-cell";
-        td.textContent = "No matching store paths.";
-        tr.appendChild(td);
-        pathsBody.appendChild(tr);
+        pathsBody.replaceChildren(
+          h(
+            "tr",
+            null,
+            h(
+              "td",
+              { colSpan: 5, className: "empty-cell" },
+              "No matching store paths.",
+            ),
+          ),
+        );
       } else {
-        for (const item of items) {
-          const tr = document.createElement("tr");
+        const rows = items.map((item) => {
           const parts = splitStorePath(item.store_path);
-          const prScope = parsePrScope(item.scope);
-
-          const tdPath = document.createElement("td");
-          const wrap = document.createElement("div");
-          wrap.className = "path-cell";
-          const link = document.createElement("a");
-          link.className = "path-text mono";
-          link.href = prScope
-            ? `/pr/${encodeURIComponent(prScope.owner)}/${encodeURIComponent(prScope.repo)}/${prScope.number}/${parts.hash}.narinfo`
+          const pr = /^pr:([^:]+):([^:]+):(\d+)$/.exec(item.scope);
+          const href = pr
+            ? `/pr/${encodeURIComponent(pr[1])}/${encodeURIComponent(pr[2])}/${pr[3]}/${parts.hash}.narinfo`
             : `/${parts.hash}.narinfo`;
-          link.title = `${item.store_path} (open .narinfo)`;
-          const h = document.createElement("span");
-          h.className = "hash-prefix";
-          h.textContent = `${parts.hash.slice(0, 8)}…-`;
-          const n = document.createElement("span");
-          n.className = "pkg-name";
-          n.textContent = parts.name;
-          link.append(h, n);
-          const actions = document.createElement("span");
-          actions.className = "path-actions";
-          const copyBtn = document.createElement("button");
-          copyBtn.type = "button";
-          copyBtn.className = "link-btn row-action";
-          copyBtn.textContent = "copy";
-          copyBtn.setAttribute("data-copy", item.store_path);
-          actions.append(copyBtn);
-          if (deleteMatchingBtn) {
-            const removeBtn = document.createElement("button");
-            removeBtn.type = "button";
-            removeBtn.className = "link-btn danger row-action admin-only";
-            removeBtn.hidden = !getToken();
-            removeBtn.textContent = "remove";
-            removeBtn.setAttribute(
-              "data-delete-path",
-              `${item.scope}\t${parts.hash}`,
-            );
-            actions.append(removeBtn);
-          }
-          wrap.append(link, actions);
-          tdPath.appendChild(wrap);
 
-          const tdScope = document.createElement("td");
-          tdScope.className = "mono muted";
-          const label = document.createElement("span");
-          label.className = "scope-label";
-          label.title = item.scope;
-          const dot = document.createElement("span");
-          dot.className = `dot ${item.scope === "main" ? "main" : "pr"}`;
-          dot.setAttribute("aria-hidden", "true");
-          let scopeNode;
-          if (prScope) {
-            scopeNode = extLink(
-              `https://github.com/${encodeURIComponent(prScope.owner)}/${encodeURIComponent(prScope.repo)}/pull/${prScope.number}`,
-              item.scope,
-            );
-            scopeNode.className = "scope-text";
-          } else {
-            scopeNode = document.createElement("span");
-            scopeNode.className = "scope-text";
-            scopeNode.textContent = item.scope;
-          }
-          label.append(dot, scopeNode);
-          tdScope.appendChild(label);
-
-          const tdOwner = document.createElement("td");
-          tdOwner.className = "mono muted";
-          tdOwner.appendChild(
-            extLink(
-              `https://github.com/${encodeURIComponent(item.owner_id)}`,
-              item.owner_id,
+          return h(
+            "tr",
+            null,
+            h(
+              "td",
+              null,
+              h(
+                "div",
+                { className: "path-cell" },
+                h(
+                  "a",
+                  {
+                    className: "path-text mono",
+                    href,
+                    title: `${item.store_path} (open .narinfo)`,
+                  },
+                  h(
+                    "span",
+                    { className: "hash-prefix" },
+                    `${parts.hash.slice(0, 8)}…-`,
+                  ),
+                  h("span", { className: "pkg-name" }, parts.name),
+                ),
+                h(
+                  "span",
+                  { className: "path-actions" },
+                  h(
+                    "button",
+                    {
+                      "type": "button",
+                      "className": "link-btn row-action",
+                      "data-copy": item.store_path,
+                    },
+                    "copy",
+                  ),
+                  Boolean(deleteMatchingBtn) &&
+                    h(
+                      "button",
+                      {
+                        "type": "button",
+                        "className": "link-btn danger row-action admin-only",
+                        "hidden": !getToken(),
+                        "data-delete-path": `${item.scope}\t${parts.hash}`,
+                      },
+                      "remove",
+                    ),
+                ),
+              ),
+            ),
+            h(
+              "td",
+              { className: "mono muted" },
+              h(
+                "span",
+                { className: "scope-label", title: item.scope },
+                h("span", {
+                  "className": `dot ${item.scope === "main" ? "main" : "pr"}`,
+                  "aria-hidden": "true",
+                }),
+                pr
+                  ? extLink(
+                      `https://github.com/${encodeURIComponent(pr[1])}/${encodeURIComponent(pr[2])}/pull/${pr[3]}`,
+                      item.scope,
+                      "scope-text",
+                    )
+                  : h("span", { className: "scope-text" }, item.scope),
+              ),
+            ),
+            h(
+              "td",
+              { className: "mono muted" },
+              extLink(
+                `https://github.com/${encodeURIComponent(item.owner_id)}`,
+                item.owner_id,
+              ),
+            ),
+            h("td", { className: "num mono" }, formatBytes(item.file_size)),
+            h(
+              "td",
+              {
+                className: "num muted",
+                title: new Date(item.last_accessed_at * 1000).toISOString(),
+              },
+              formatAge(item.last_accessed_at),
             ),
           );
-
-          const tdSize = document.createElement("td");
-          tdSize.className = "num mono";
-          tdSize.textContent = formatBytes(item.file_size);
-
-          const tdAge = document.createElement("td");
-          tdAge.className = "num muted";
-          tdAge.title = new Date(item.last_accessed_at * 1000).toISOString();
-          tdAge.textContent = formatAge(item.last_accessed_at);
-
-          tr.append(tdPath, tdScope, tdOwner, tdSize, tdAge);
-          pathsBody.appendChild(tr);
-        }
+        });
+        pathsBody.replaceChildren(...rows);
       }
       pathsStatus.textContent = `${items.length} shown`;
     } catch (error) {
@@ -337,11 +397,7 @@
         return;
       }
       pathsStatus.textContent = "";
-      showNotice(
-        "paths-error",
-        error instanceof Error ? error.message : String(error),
-        "error",
-      );
+      showNotice("paths-error", errMsg(error), "error");
     }
   }
 
@@ -360,46 +416,20 @@
 
   if (deleteMatchingBtn) {
     deleteMatchingBtn.addEventListener("click", async () => {
-      if (deleteMatchingBtn.getAttribute("data-armed") !== "true") {
-        deleteMatchingBtn.setAttribute("data-armed", "true");
-        deleteMatchingBtn.textContent = "Confirm delete?";
-        setTimeout(() => {
-          if (deleteMatchingBtn.getAttribute("data-armed") === "true") {
-            deleteMatchingBtn.removeAttribute("data-armed");
-            deleteMatchingBtn.textContent = "Delete matching";
-          }
-        }, 4000);
-
+      if (
+        !armConfirm(deleteMatchingBtn, "Confirm delete?", "Delete matching") ||
+        !getToken()
+      ) {
         return;
       }
-
-      const token = getToken();
-      if (!token) {
-        return;
-      }
-      const params = new URLSearchParams();
-      if (searchInput.value.trim()) {
-        params.set("q", searchInput.value.trim());
-      }
-      if (ownerSelect.value) {
-        params.set("owner", ownerSelect.value);
-      }
-      if (scopeSelect.value) {
-        params.set("scope", scopeSelect.value);
-      }
-
       deleteMatchingBtn.disabled = true;
       deleteMatchingBtn.removeAttribute("data-armed");
       deleteMatchingBtn.textContent = "Deleting…";
       try {
-        const res = await fetch(`/api/v1/admin/paths?${params.toString()}`, {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-        const data = await res.json();
+        const data = await adminFetch(
+          `/api/v1/admin/paths?${buildFilterParams().toString()}`,
+          "DELETE",
+        );
         showNotice(
           "admin-notice",
           `Removed ${data.removed} store paths. Run GC to delete unreferenced GHCR blobs.`,
@@ -407,11 +437,7 @@
         );
         await Promise.all([refreshPaths(), refreshOverview()]);
       } catch (error) {
-        showNotice(
-          "admin-notice",
-          error instanceof Error ? error.message : String(error),
-          "error",
-        );
+        showNotice("admin-notice", errMsg(error), "error");
       } finally {
         deleteMatchingBtn.textContent = "Delete matching";
         syncDeleteMatchingState();
@@ -419,64 +445,6 @@
     });
   }
 
-  document.addEventListener("click", async (event) => {
-    const btn = event.target.closest("[data-delete-path]");
-    if (!btn) {
-      return;
-    }
-    if (btn.getAttribute("data-armed") !== "true") {
-      btn.setAttribute("data-armed", "true");
-      btn.textContent = "confirm?";
-      setTimeout(() => {
-        if (btn.isConnected && btn.getAttribute("data-armed") === "true") {
-          btn.removeAttribute("data-armed");
-          btn.textContent = "remove";
-        }
-      }, 4000);
-
-      return;
-    }
-
-    const token = getToken();
-    if (!token) {
-      return;
-    }
-    const raw = btn.getAttribute("data-delete-path") || "";
-    const sep = raw.indexOf("\t");
-    const scope = raw.slice(0, sep);
-    const hash = raw.slice(sep + 1);
-    btn.disabled = true;
-    try {
-      const params = new URLSearchParams({ scope, hash });
-      const res = await fetch(`/api/v1/admin/paths?${params.toString()}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        throw new Error(await res.text());
-      }
-      const data = await res.json();
-      const row = btn.closest("tr");
-      if (row) {
-        row.remove();
-      }
-      showNotice(
-        "admin-notice",
-        `Removed ${data.removed} store path. Run GC to delete unreferenced GHCR blobs.`,
-        "ok",
-      );
-      refreshOverview();
-    } catch (error) {
-      btn.disabled = false;
-      btn.removeAttribute("data-armed");
-      btn.textContent = "remove";
-      showNotice(
-        "admin-notice",
-        error instanceof Error ? error.message : String(error),
-        "error",
-      );
-    }
-  });
   for (const btn of sortButtons) {
     btn.addEventListener("click", () => {
       const next = btn.getAttribute("data-sort");
@@ -496,11 +464,71 @@
     });
   }
 
+  // Row-level admin delete (paths & PR overlays)
+  document.addEventListener("click", async (event) => {
+    const pathBtn = event.target.closest("[data-delete-path]");
+    if (pathBtn) {
+      if (!armConfirm(pathBtn, "confirm?", "remove") || !getToken()) {
+        return;
+      }
+      const raw = pathBtn.getAttribute("data-delete-path") || "";
+      const sep = raw.indexOf("\t");
+      pathBtn.disabled = true;
+      try {
+        const params = new URLSearchParams({
+          scope: raw.slice(0, sep),
+          hash: raw.slice(sep + 1),
+        });
+        const data = await adminFetch(
+          `/api/v1/admin/paths?${params.toString()}`,
+          "DELETE",
+        );
+        pathBtn.closest("tr")?.remove();
+        showNotice(
+          "admin-notice",
+          `Removed ${data.removed} store path. Run GC to delete unreferenced GHCR blobs.`,
+          "ok",
+        );
+        refreshOverview();
+      } catch (error) {
+        pathBtn.disabled = false;
+        pathBtn.removeAttribute("data-armed");
+        pathBtn.textContent = "remove";
+        showNotice("admin-notice", errMsg(error), "error");
+      }
+
+      return;
+    }
+
+    const prBtn = event.target.closest("[data-delete-pr]");
+    if (prBtn) {
+      if (!armConfirm(prBtn, "confirm?", "remove") || !getToken()) {
+        return;
+      }
+      const target = prBtn.getAttribute("data-delete-pr");
+      prBtn.disabled = true;
+      try {
+        const data = await adminFetch(`/api/v1/admin/prs/${target}`, "DELETE");
+        showNotice(
+          "admin-notice",
+          `Removed PR overlay ${target} (${data.removed} paths deleted)`,
+          "ok",
+        );
+        await Promise.all([refreshPaths(), refreshOverview()]);
+      } catch (error) {
+        prBtn.disabled = false;
+        prBtn.removeAttribute("data-armed");
+        prBtn.textContent = "remove";
+        showNotice("admin-notice", errMsg(error), "error");
+      }
+    }
+  });
+
   // Admin drawer toggle / unlock / lock
-  const toggleBtn = document.querySelector("#admin-toggle-btn");
-  const loginForm = document.querySelector("#admin-login-form");
-  const tokenInput = document.querySelector("#admin-token-input");
-  const lockBtn = document.querySelector("#admin-lock-btn");
+  const toggleBtn = $("#admin-toggle-btn");
+  const loginForm = $("#admin-login-form");
+  const tokenInput = $("#admin-token-input");
+  const lockBtn = $("#admin-lock-btn");
 
   if (toggleBtn && loginForm) {
     toggleBtn.addEventListener("click", () => {
@@ -520,7 +548,7 @@
       if (!token) {
         return;
       }
-      const submitBtn = loginForm.querySelector('button[type="submit"]');
+      const submitBtn = $('button[type="submit"]', loginForm);
       if (submitBtn) {
         submitBtn.disabled = true;
       }
@@ -542,11 +570,7 @@
         tokenInput.value = "";
         setAdminUi(true);
       } catch (error) {
-        showNotice(
-          "admin-notice",
-          error instanceof Error ? error.message : String(error),
-          "error",
-        );
+        showNotice("admin-notice", errMsg(error), "error");
       } finally {
         if (submitBtn) {
           submitBtn.disabled = false;
@@ -564,53 +588,26 @@
   }
 
   // Admin GC buttons
-  const MAX_UI_GC_ROUNDS = 200;
-  const dryRunBtn = document.querySelector("#gc-dry-run-btn");
-  const gcBtn = document.querySelector("#gc-run-btn");
-
-  function setGcButtonsDisabled(disabled) {
-    if (dryRunBtn) {
-      dryRunBtn.disabled = disabled;
-    }
-    if (gcBtn) {
-      gcBtn.disabled = disabled;
-    }
-  }
+  const dryRunBtn = $("#gc-dry-run-btn");
+  const gcBtn = $("#gc-run-btn");
 
   async function triggerGc(dryRun) {
-    const token = getToken();
-    if (!token) {
+    if (!getToken()) {
       return;
     }
-    setGcButtonsDisabled(true);
+    if (dryRunBtn) {
+      dryRunBtn.disabled = true;
+    }
+    if (gcBtn) {
+      gcBtn.disabled = true;
+    }
     showNotice(
       "admin-notice",
       dryRun ? "Running dry-run GC…" : "Running GC…",
       "",
     );
+
     try {
-      if (dryRun) {
-        const res = await fetch("/api/v1/admin/gc?dry_run=true", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-        const r = await res.json();
-        showNotice(
-          "admin-notice",
-          `Dry-run GC: pr_removed=${r.pr_paths_removed}, main_removed=${
-            r.main_paths_removed
-          }, blobs_deleted=${r.blobs_deleted}, blocked=${
-            r.blobs_blocked
-          }, skipped=${r.blobs_skipped}, errors=${r.blob_errors}`,
-          r.blob_errors > 0 ? "error" : "ok",
-        );
-
-        return;
-      }
-
       const totals = {
         pr_paths_removed: 0,
         main_paths_removed: 0,
@@ -620,18 +617,12 @@
         blob_errors: 0,
         last_error: "",
       };
+      const url = dryRun ? "/api/v1/admin/gc?dry_run=true" : "/api/v1/admin/gc";
       let rounds = 0;
 
       while (rounds < MAX_UI_GC_ROUNDS) {
         rounds += 1;
-        const res = await fetch("/api/v1/admin/gc", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-        const r = await res.json();
+        const r = await adminFetch(url, "POST");
         totals.pr_paths_removed += r.pr_paths_removed;
         totals.main_paths_removed += r.main_paths_removed;
         totals.blobs_deleted += r.blobs_deleted;
@@ -648,43 +639,42 @@
           r.pr_paths_removed > 0 ||
           r.main_paths_removed > 0;
         if (
+          dryRun ||
           r.blobs_skipped === 0 ||
           !madeProgress ||
           rounds >= MAX_UI_GC_ROUNDS
         ) {
           break;
         }
+
         showNotice(
           "admin-notice",
-          `Running GC (round ${rounds + 1})… ${totals.blobs_deleted} blobs deleted${
-            totals.blob_errors > 0 ? `, ${totals.blob_errors} errors` : ""
-          }`,
+          `Running GC (round ${rounds + 1})… ${totals.blobs_deleted} blobs deleted${totals.blob_errors > 0 ? `, ${totals.blob_errors} errors` : ""}`,
           "",
         );
         await refreshOverview();
       }
 
+      const prefix = dryRun
+        ? "Dry-run GC"
+        : `GC complete${rounds > 1 ? ` (${rounds} rounds)` : ""}`;
       showNotice(
         "admin-notice",
-        `GC complete${rounds > 1 ? ` (${rounds} rounds)` : ""}: ` +
-          `pr_removed=${totals.pr_paths_removed}, main_removed=${
-            totals.main_paths_removed
-          }, blobs_deleted=${totals.blobs_deleted}, blocked=${
-            totals.blobs_blocked
-          }, skipped=${totals.blobs_skipped}, errors=${totals.blob_errors}${
-            totals.last_error ? ` — ${totals.last_error}` : ""
-          }`,
+        `${prefix}: pr_removed=${totals.pr_paths_removed}, main_removed=${totals.main_paths_removed}, blobs_deleted=${totals.blobs_deleted}, blocked=${totals.blobs_blocked}, skipped=${totals.blobs_skipped}, errors=${totals.blob_errors}${totals.last_error ? ` — ${totals.last_error}` : ""}`,
         totals.blob_errors > 0 ? "error" : "ok",
       );
-      await Promise.all([refreshPaths(), refreshOverview()]);
+      if (!dryRun) {
+        await Promise.all([refreshPaths(), refreshOverview()]);
+      }
     } catch (error) {
-      showNotice(
-        "admin-notice",
-        error instanceof Error ? error.message : String(error),
-        "error",
-      );
+      showNotice("admin-notice", errMsg(error), "error");
     } finally {
-      setGcButtonsDisabled(false);
+      if (dryRunBtn) {
+        dryRunBtn.disabled = false;
+      }
+      if (gcBtn) {
+        gcBtn.disabled = false;
+      }
     }
   }
 
@@ -694,72 +684,6 @@
   if (gcBtn) {
     gcBtn.addEventListener("click", () => triggerGc(false));
   }
-
-  // Admin PR delete with inline confirm
-  document.addEventListener("click", async (event) => {
-    const btn = event.target.closest("[data-delete-pr]");
-    if (!btn) {
-      return;
-    }
-    if (btn.getAttribute("data-armed") !== "true") {
-      btn.setAttribute("data-armed", "true");
-      btn.textContent = "confirm?";
-      setTimeout(() => {
-        if (btn.isConnected && btn.getAttribute("data-armed") === "true") {
-          btn.removeAttribute("data-armed");
-          btn.textContent = "remove";
-        }
-      }, 4000);
-
-      return;
-    }
-
-    const token = getToken();
-    if (!token) {
-      return;
-    }
-    const target = btn.getAttribute("data-delete-pr");
-    btn.disabled = true;
-    try {
-      const res = await fetch(`/api/v1/admin/prs/${target}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        throw new Error(await res.text());
-      }
-      const data = await res.json();
-      const row = btn.closest("tr");
-      const tbody = row ? row.parentElement : null;
-      if (row) {
-        row.remove();
-      }
-      if (tbody && tbody.children.length === 0) {
-        const emptyTr = document.createElement("tr");
-        const emptyTd = document.createElement("td");
-        emptyTd.colSpan = 5;
-        emptyTd.className = "empty-cell";
-        emptyTd.textContent = "No active PR overlays.";
-        emptyTr.appendChild(emptyTd);
-        tbody.appendChild(emptyTr);
-      }
-      showNotice(
-        "admin-notice",
-        `Removed PR overlay ${target} (${data.removed} paths deleted)`,
-        "ok",
-      );
-      await Promise.all([refreshPaths(), refreshOverview()]);
-    } catch (error) {
-      btn.disabled = false;
-      btn.removeAttribute("data-armed");
-      btn.textContent = "remove";
-      showNotice(
-        "admin-notice",
-        error instanceof Error ? error.message : String(error),
-        "error",
-      );
-    }
-  });
 
   if (getToken()) {
     setAdminUi(true);

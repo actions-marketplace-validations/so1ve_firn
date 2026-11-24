@@ -2,7 +2,7 @@ import { createApp } from "../server/app.ts";
 import type { LoadedConfig, ServerRuntimeEnv } from "../server/config.ts";
 import { loadConfig } from "../server/config.ts";
 import { openLibsql } from "../server/db/libsql.ts";
-import type { CloseableSqlDatabase } from "../server/db/sqlite.ts";
+import type { CloseableSqlDatabase } from "../server/db.ts";
 import { runGc } from "../server/gc.ts";
 import type { GcReport } from "../shared/protocol.ts";
 
@@ -22,11 +22,10 @@ function readProcessEnv(): WebRuntimeEnv {
     process?: { env?: Record<string, string | undefined> };
     Deno?: { env?: { toObject: () => Record<string, string | undefined> } };
   };
-  if (globalObj.Deno?.env) {
-    return globalObj.Deno.env.toObject();
-  }
 
-  return globalObj.process?.env ?? {};
+  return globalObj.Deno?.env
+    ? globalObj.Deno.env.toObject()
+    : (globalObj.process?.env ?? {});
 }
 
 export function createWebApp(
@@ -39,10 +38,7 @@ export function createWebApp(
     config: LoadedConfig;
   }> | null = null;
 
-  function ensureInitialized(): Promise<{
-    db: CloseableSqlDatabase;
-    config: LoadedConfig;
-  }> {
+  function ensureInitialized() {
     initialized ??= (async () => {
       const libsqlUrl = env.LIBSQL_URL?.trim();
       if (!libsqlUrl) {
@@ -51,14 +47,13 @@ export function createWebApp(
         );
       }
       const config = await loadConfig(env, { defaultMaxGcSubrequests: 200 });
-      const db = openLibsql(
+      dbInstance = openLibsql(
         libsqlUrl,
         env.LIBSQL_AUTH_TOKEN?.trim(),
         customFetch,
       );
-      dbInstance = db;
 
-      return { db, config };
+      return { db: dbInstance, config };
     })();
 
     return initialized;
@@ -67,16 +62,12 @@ export function createWebApp(
   const app = createApp(() => ensureInitialized());
 
   return {
-    async fetch(request: Request): Promise<Response> {
-      return app.fetch(request);
-    },
-
-    async runScheduledGc(): Promise<GcReport> {
+    fetch: async (request: Request) => app.fetch(request),
+    runScheduledGc: async () => {
       const { db, config } = await ensureInitialized();
 
       return runGc(db, config, false);
     },
-
     close(): void {
       dbInstance?.close();
       dbInstance = null;

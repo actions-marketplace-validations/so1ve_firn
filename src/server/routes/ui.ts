@@ -1,10 +1,13 @@
 import type { Context } from "hono";
 
 import { unixNow } from "../../shared/nix-format.ts";
-import type { OwnerStatusSummary } from "../../shared/protocol.ts";
 import type { AppBindings } from "../app.ts";
-import type { StorePathSort } from "../db.ts";
-import { cacheStats, listPrScopes, listStorePaths, ownerStats } from "../db.ts";
+import {
+  cacheStats,
+  listOwnerSummaries,
+  listPrScopes,
+  listStorePaths,
+} from "../db.ts";
 import { renderDashboardPage } from "../ui/page.ts";
 
 export async function handleDashboard(
@@ -12,27 +15,9 @@ export async function handleDashboard(
 ): Promise<Response> {
   const config = c.get("config");
   const db = c.get("db");
-  const sortedOwners = [...config.ownersByName.values()].sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
-
   const [cache, owners, prs, paths] = await Promise.all([
     cacheStats(db),
-    Promise.all(
-      sortedOwners.map(async (owner): Promise<OwnerStatusSummary> => {
-        const stats = await ownerStats(db, owner.name);
-
-        return {
-          name: owner.name,
-          owner_type: owner.ownerType,
-          active_prs: stats.activePrs,
-          total_blobs: stats.totalBlobs,
-          total_bytes: stats.totalBytes,
-          unreferenced_blobs: stats.unreferencedBlobs,
-          blocked_blobs: stats.blockedBlobs,
-        };
-      }),
-    ),
+    listOwnerSummaries(db, config.ownersByName.values()),
     listPrScopes(db, null),
     listStorePaths(db, null, null, 50),
   ]);
@@ -65,27 +50,19 @@ export async function respondWithStorePaths(
   }
   const scope = c.req.query("scope") || null;
   const query = c.req.query("q")?.trim() || null;
-  const sortRaw = c.req.query("sort") || "accessed";
-  if (sortRaw !== "accessed" && sortRaw !== "size") {
-    return c.text(`invalid sort '${sortRaw}'`, 400);
+  const sort = c.req.query("sort") || "accessed";
+  if (sort !== "accessed" && sort !== "size") {
+    return c.text(`invalid sort '${sort}'`, 400);
   }
-  const sort: StorePathSort = sortRaw;
   const limitRaw = Number.parseInt(c.req.query("limit") ?? "50", 10);
   const limit =
     Number.isFinite(limitRaw) && limitRaw > 0
       ? Math.min(limitRaw, maxLimit)
       : 50;
 
-  const paths = await listStorePaths(
-    c.get("db"),
-    owner,
-    scope,
-    limit,
-    query,
-    sort,
+  return c.json(
+    await listStorePaths(c.get("db"), owner, scope, limit, query, sort),
   );
-
-  return c.json(paths);
 }
 
 export const handlePublicPaths = (c: Context<AppBindings>): Promise<Response> =>

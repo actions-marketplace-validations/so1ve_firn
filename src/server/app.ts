@@ -1,8 +1,9 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 
+import { errorMessage } from "../shared/format.ts";
 import type { LoadedConfig } from "./config.ts";
-import type { SqlDatabase } from "./db/types.ts";
+import type { SqlDatabase } from "./db.ts";
 import {
   handleAdminDeletePaths,
   handleAdminDeletePr,
@@ -10,6 +11,7 @@ import {
   handleAdminListPaths,
   handleAdminListPrs,
   handleAdminStatus,
+  requireAdmin,
 } from "./routes/admin.ts";
 import {
   handleMainCacheInfo,
@@ -21,7 +23,11 @@ import {
   handlePublicKeys,
 } from "./routes/cache.ts";
 import { handleDashboard, handlePublicPaths } from "./routes/ui.ts";
-import { handleUploadCommit, handleUploadPlan } from "./routes/upload.ts";
+import {
+  HttpError,
+  handleUploadCommit,
+  handleUploadPlan,
+} from "./routes/upload.ts";
 import { handleWebhook } from "./routes/webhook.ts";
 
 export interface AppContext {
@@ -48,7 +54,7 @@ function defaultWaitUntil(promise: Promise<unknown>): void {
     console.error(
       JSON.stringify({
         message: "background task failed",
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       }),
     );
   });
@@ -69,6 +75,8 @@ export function createApp<E extends object = object>(
     c.set("waitUntil", resolved.waitUntil ?? defaultWaitUntil);
     await next();
   });
+
+  app.use("/api/v1/admin/*", requireAdmin);
 
   app.get("/", handleDashboard);
   app.get("/api/v1/public-keys", handlePublicKeys);
@@ -92,7 +100,14 @@ export function createApp<E extends object = object>(
   app.get("/:narinfo", handleMainNarInfo);
 
   app.onError((error, c) => {
-    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof HttpError) {
+      return c.text(
+        error.message,
+        error.status,
+        error.code ? { "X-Firn-Error": error.code } : undefined,
+      );
+    }
+    const message = errorMessage(error);
     console.error(
       JSON.stringify({
         message: "unhandled server error",

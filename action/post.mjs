@@ -1,25 +1,13 @@
 import fs from "node:fs";
 
 import { PushHttpError, runPush } from "../src/cli/push.ts";
-import { getInput, getState, listStoreEntries } from "./common.mjs";
-
-function readExplicitPaths() {
-  const fromInput = getInput("paths").split(/\s+/).filter(Boolean);
-
-  const pathsFile = getState("paths_file");
-  const fromFile =
-    pathsFile && fs.existsSync(pathsFile)
-      ? fs
-          .readFileSync(pathsFile, "utf8")
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean)
-      : [];
-
-  return [...new Set([...fromInput, ...fromFile])].filter((storePath) =>
-    fs.existsSync(storePath),
-  );
-}
+import {
+  errorMessage,
+  getInput,
+  getState,
+  listStoreEntries,
+  readTrimmedLines,
+} from "./common.mjs";
 
 async function main() {
   if (getState("should_push") !== "true") {
@@ -27,16 +15,16 @@ async function main() {
   }
 
   const server = getInput("server").replace(/\/+$/, "");
-  const owner = getInput("owner") || undefined;
-  const token = getInput("token") || undefined;
-  const jobs = Number.parseInt(getInput("jobs"), 10) || 4;
-  const includeUpstream = getInput("include-upstream").toLowerCase() === "true";
   const githubToken = getInput("github-token");
   if (githubToken) {
     process.env.GITHUB_TOKEN = githubToken;
   }
 
-  const explicitPaths = readExplicitPaths();
+  const fromInput = getInput("paths").split(/\s+/).filter(Boolean);
+  const explicitPaths = [
+    ...new Set([...fromInput, ...readTrimmedLines(getState("paths_file"))]),
+  ].filter((storePath) => fs.existsSync(storePath));
+
   if (getInput("paths") && explicitPaths.length === 0) {
     console.log("No existing paths matched 'paths' input; nothing to push.");
 
@@ -58,15 +46,7 @@ async function main() {
 
       return;
     }
-
-    const before = new Set(
-      fs
-        .readFileSync(snapshotFile, "utf8")
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean),
-    );
-
+    const before = new Set(readTrimmedLines(snapshotFile));
     targetPaths = listStoreEntries()
       .filter((entry) => !before.has(entry))
       .map((entry) => `/nix/store/${entry}`)
@@ -78,7 +58,6 @@ async function main() {
 
       return;
     }
-
     console.log(
       `Inspecting ${targetPaths.length} new /nix/store entries for ${server}`,
     );
@@ -86,13 +65,13 @@ async function main() {
 
   await runPush({
     server,
-    owner,
-    token,
+    owner: getInput("owner") || undefined,
+    token: getInput("token") || undefined,
     stdin: false,
-    includeUpstream,
+    includeUpstream: getInput("include-upstream").toLowerCase() === "true",
     excludeUnreferencedFods,
     skipSignedBy: ["cache.nixos.org-1:"],
-    jobs,
+    jobs: Number.parseInt(getInput("jobs"), 10) || 4,
     zstdLevel: 3,
     paths: targetPaths,
   });
@@ -109,9 +88,6 @@ try {
     console.log(`::notice::Skipping Firn cache push: ${error.body}`);
     process.exit(0);
   }
-
-  console.error(
-    `::error::${error instanceof Error ? error.message : String(error)}`,
-  );
+  console.error(`::error::${errorMessage(error)}`);
   process.exit(1);
 }

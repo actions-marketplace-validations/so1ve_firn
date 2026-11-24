@@ -9,6 +9,9 @@ export const getInput = (name) =>
 
 export const getState = (name) => (process.env[`STATE_${name}`] ?? "").trim();
 
+export const errorMessage = (error) =>
+  error instanceof Error ? error.message : String(error);
+
 function appendEnvFile(filePath, name, value) {
   if (!filePath) {
     return;
@@ -28,6 +31,18 @@ export const exportEnv = (name, value) =>
 
 export const tempDir = () => process.env.RUNNER_TEMP || os.tmpdir();
 
+export function readTrimmedLines(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return [];
+  }
+
+  return fs
+    .readFileSync(filePath, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 export function listStoreEntries() {
   if (!fs.existsSync(STORE_DIR)) {
     return [];
@@ -38,10 +53,7 @@ export function listStoreEntries() {
     .filter(
       (name) =>
         STORE_ENTRY_RE.test(name) &&
-        !name.endsWith(".drv") &&
-        !name.endsWith(".drv.chroot") &&
-        !name.endsWith(".lock") &&
-        !name.endsWith(".check"),
+        !/\.(?:drv(?:\.chroot)?|lock|check)$/.test(name),
     )
     .sort();
 }
@@ -51,7 +63,6 @@ export function readEventPayload() {
   if (!eventPath || !fs.existsSync(eventPath)) {
     return {};
   }
-
   try {
     return JSON.parse(fs.readFileSync(eventPath, "utf8"));
   } catch {

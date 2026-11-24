@@ -1,71 +1,52 @@
-import type { Context } from "hono";
+import type { Context, Next } from "hono";
 
 import { validateStoreHash } from "../../shared/nix-format.ts";
-import type {
-  AdminStatusResponse,
-  OwnerStatusSummary,
-} from "../../shared/protocol.ts";
+import type { AdminStatusResponse } from "../../shared/protocol.ts";
 import type { AppBindings } from "../app.ts";
 import {
   cacheStats,
   deletePrScope,
   deleteStorePaths,
+  listOwnerSummaries,
   listPrScopes,
-  ownerStats,
 } from "../db.ts";
 import { runGc } from "../gc.ts";
-import { timingSafeEqualString } from "../github.ts";
+import { extractBearerToken, timingSafeEqualString } from "../github.ts";
 import { respondWithStorePaths } from "./ui.ts";
 
-async function requireAdmin(c: Context<AppBindings>): Promise<Response | null> {
+export async function requireAdmin(
+  c: Context<AppBindings>,
+  next: Next,
+): Promise<Response | void> {
   const adminToken = c.get("config").adminToken;
   if (!adminToken) {
     return c.text("admin API is not enabled (ADMIN_TOKEN not set)", 404);
   }
-
-  const authHeader = c.req.header("authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
+  const candidate = extractBearerToken(c.req.header("authorization"));
+  if (!candidate) {
     return c.text("missing or invalid Bearer Authorization header", 401);
   }
-  const candidate = authHeader.slice("Bearer ".length).trim();
   if (!(await timingSafeEqualString(adminToken, candidate))) {
     return c.text("invalid admin token", 401);
   }
-
-  return null;
+  await next();
 }
+
+export const handleAdminListPaths = (
+  c: Context<AppBindings>,
+): Promise<Response> => respondWithStorePaths(c, 500);
 
 export async function handleAdminStatus(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  const denied = await requireAdmin(c);
-  if (denied) {
-    return denied;
-  }
-
   const config = c.get("config");
-  const cache = await cacheStats(c.get("db"));
-  const sortedOwners = [...config.ownersByName.values()].sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
+  const db = c.get("db");
+  const [cache, owners] = await Promise.all([
+    cacheStats(db),
+    listOwnerSummaries(db, config.ownersByName.values()),
+  ]);
 
-  const owners: OwnerStatusSummary[] = await Promise.all(
-    sortedOwners.map(async (owner) => {
-      const stats = await ownerStats(c.get("db"), owner.name);
-
-      return {
-        name: owner.name,
-        owner_type: owner.ownerType,
-        active_prs: stats.activePrs,
-        total_blobs: stats.totalBlobs,
-        total_bytes: stats.totalBytes,
-        unreferenced_blobs: stats.unreferencedBlobs,
-        blocked_blobs: stats.blockedBlobs,
-      };
-    }),
-  );
-
-  const payload: AdminStatusResponse = {
+  return c.json({
     public_base_url: config.publicBaseUrl,
     gc: {
       pr_ttl_days: config.gc.prTtlDays,
@@ -77,30 +58,12 @@ export async function handleAdminStatus(
     pr_paths: cache.prPaths,
     active_prs: cache.activePrs,
     owners,
-  };
-
-  return c.json(payload);
-}
-
-export async function handleAdminListPaths(
-  c: Context<AppBindings>,
-): Promise<Response> {
-  const denied = await requireAdmin(c);
-  if (denied) {
-    return denied;
-  }
-
-  return respondWithStorePaths(c, 500);
+  } satisfies AdminStatusResponse);
 }
 
 export async function handleAdminDeletePaths(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  const denied = await requireAdmin(c);
-  if (denied) {
-    return denied;
-  }
-
   const owner = c.req.query("owner") || null;
   if (owner && !c.get("config").ownersByName.has(owner)) {
     return c.text(`unknown owner '${owner}'`, 400);
@@ -115,7 +78,6 @@ export async function handleAdminDeletePaths(
       return c.text(`invalid store hash '${hash}'`, 400);
     }
   }
-
   if (!owner && !scope && !query && !hash) {
     return c.text(
       "at least one filter (owner, scope, q, or hash) is required",
@@ -136,29 +98,17 @@ export async function handleAdminDeletePaths(
 export async function handleAdminListPrs(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  const denied = await requireAdmin(c);
-  if (denied) {
-    return denied;
-  }
-
   const owner = c.req.query("owner") || null;
   if (owner && !c.get("config").ownersByName.has(owner)) {
     return c.text(`unknown owner '${owner}'`, 400);
   }
 
-  const prs = await listPrScopes(c.get("db"), owner);
-
-  return c.json(prs);
+  return c.json(await listPrScopes(c.get("db"), owner));
 }
 
 export async function handleAdminDeletePr(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  const denied = await requireAdmin(c);
-  if (denied) {
-    return denied;
-  }
-
   const owner = c.req.param("owner") ?? "";
   if (!c.get("config").ownersByName.has(owner)) {
     return c.text(`unknown owner '${owner}'`, 404);
@@ -174,16 +124,13 @@ export async function handleAdminDeletePr(
   return c.json({ owner, repo, pr_number: prNumber, removed });
 }
 
-export async function handleAdminGc(
+export const handleAdminGc = async (
   c: Context<AppBindings>,
-): Promise<Response> {
-  const denied = await requireAdmin(c);
-  if (denied) {
-    return denied;
-  }
-
-  const dryRun = c.req.query("dry_run") === "true";
-  const report = await runGc(c.get("db"), c.get("config"), dryRun);
-
-  return c.json(report);
-}
+): Promise<Response> =>
+  c.json(
+    await runGc(
+      c.get("db"),
+      c.get("config"),
+      c.req.query("dry_run") === "true",
+    ),
+  );

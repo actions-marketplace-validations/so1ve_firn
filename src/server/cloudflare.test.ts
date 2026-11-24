@@ -11,6 +11,7 @@ import type { CloudflareWorkerEnv } from "../entry/cloudflare.ts";
 import worker from "../entry/cloudflare.ts";
 import {
   SigningKeyPair,
+  bytesToBase64,
   encodeHex,
   fingerprint,
   formatSha256NixBase32,
@@ -26,10 +27,10 @@ import type {
   PlanResponse,
   StorePathSummary,
 } from "../shared/protocol.ts";
-import { d1Adapter } from "./db/d1.ts";
 import {
   MAIN_SCOPE,
   commitEntries,
+  d1Adapter,
   evictStaleMainPaths,
   getNarInfo,
   listUnreferencedBlobs,
@@ -53,38 +54,21 @@ interface MockStore {
   nextVersionId: number;
 }
 
-function base64UrlEncode(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
+const encoder = new TextEncoder();
 
-  return btoa(binary)
+const base64UrlEncode = (bytes: Uint8Array): string =>
+  bytesToBase64(bytes)
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replace(/=+$/, "");
-}
 
 function toPem(der: Uint8Array, label: string): string {
-  let binary = "";
-  for (const byte of der) {
-    binary += String.fromCharCode(byte);
-  }
-  const b64 = btoa(binary);
-  const lines = b64.match(/.{1,64}/g) ?? [];
+  const lines = bytesToBase64(der).match(/.{1,64}/g) ?? [];
 
   return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----`;
 }
 
-interface TestJwk extends JsonWebKey {
-  kid: string;
-}
-
-async function generateRsaPair(): Promise<{
-  privateKey: CryptoKey;
-  pkcs8Pem: string;
-  jwk: TestJwk;
-}> {
+async function generateRsaPair() {
   const pair = (await crypto.subtle.generateKey(
     {
       name: "RSASSA-PKCS1-v1_5",
@@ -116,19 +100,17 @@ async function signJwt(
   claims: Record<string, unknown>,
 ): Promise<string> {
   const header = base64UrlEncode(
-    new TextEncoder().encode(
+    encoder.encode(
       JSON.stringify({ alg: "RS256", typ: "JWT", kid: "test-kid-1" }),
     ),
   );
-  const payload = base64UrlEncode(
-    new TextEncoder().encode(JSON.stringify(claims)),
-  );
+  const payload = base64UrlEncode(encoder.encode(JSON.stringify(claims)));
   const input = `${header}.${payload}`;
   const sig = new Uint8Array(
     await crypto.subtle.sign(
       "RSASSA-PKCS1-v1_5",
       privateKey,
-      new TextEncoder().encode(input),
+      encoder.encode(input),
     ),
   );
 
@@ -138,13 +120,13 @@ async function signJwt(
 async function signWebhook(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(secret),
+    encoder.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
   );
   const mac = new Uint8Array(
-    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)),
+    await crypto.subtle.sign("HMAC", key, encoder.encode(body)),
   );
 
   return `sha256=${encodeHex(mac)}`;
@@ -153,16 +135,9 @@ async function signWebhook(secret: string, body: string): Promise<string> {
 const createMockFetch =
   (jwk: JsonWebKey, store: MockStore): typeof globalThis.fetch =>
   async (input: RequestInfo | URL, init?: RequestInit) => {
-    const reqUrl =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input.url;
-    const method = (
-      init?.method ?? (input instanceof Request ? input.method : "GET")
-    ).toUpperCase();
-    const url = new URL(reqUrl);
+    const req = new Request(input, init);
+    const method = req.method.toUpperCase();
+    const url = new URL(req.url);
 
     if (url.pathname === "/.well-known/jwks") {
       return Response.json({ keys: [jwk] });
@@ -180,32 +155,31 @@ const createMockFetch =
       if (!store.blobs.has(key)) {
         return new Response("not found", { status: 404 });
       }
-      if (method === "HEAD") {
-        return new Response(null, { status: 200 });
-      }
 
-      return new Response(null, {
-        status: 307,
-        headers: { Location: `https://cdn.example/cdn/${key}` },
-      });
+      return method === "HEAD"
+        ? new Response(null, { status: 200 })
+        : new Response(null, {
+            status: 307,
+            headers: { Location: `https://cdn.example/cdn/${key}` },
+          });
     }
 
     const manifestMatch = /^\/v2\/([^/]+)\/([^/]+)\/manifests\/(.+)$/.exec(
       url.pathname,
     );
     if (manifestMatch) {
-      const key = `${manifestMatch[1]}/${manifestMatch[2]}/${manifestMatch[3]}`;
-      const found = store.manifests.get(key);
-      if (!found) {
-        return new Response("not found", { status: 404 });
-      }
+      const found = store.manifests.get(
+        `${manifestMatch[1]}/${manifestMatch[2]}/${manifestMatch[3]}`,
+      );
 
-      return new Response(found as BodyInit, {
-        status: 200,
-        headers: {
-          "Content-Type": "application/vnd.oci.image.manifest.v1+json",
-        },
-      });
+      return found
+        ? new Response(found as BodyInit, {
+            status: 200,
+            headers: {
+              "Content-Type": "application/vnd.oci.image.manifest.v1+json",
+            },
+          })
+        : new Response("not found", { status: 404 });
     }
 
     if (/^\/app\/installations\/\d+\/access_tokens$/.test(url.pathname)) {
@@ -220,8 +194,9 @@ const createMockFetch =
         url.pathname,
       );
     if (versionsListMatch && method === "GET") {
-      const key = `${versionsListMatch[1]}/${versionsListMatch[2]}`;
-      const all = store.versions.get(key) ?? [];
+      const all =
+        store.versions.get(`${versionsListMatch[1]}/${versionsListMatch[2]}`) ??
+        [];
       const perPage = Number.parseInt(
         url.searchParams.get("per_page") ?? "100",
         10,
@@ -232,50 +207,49 @@ const createMockFetch =
       return Response.json(all.slice(start, start + perPage));
     }
 
-    const versionDeleteMatch =
+    const versionItemMatch =
       /^\/users\/([^/]+)\/packages\/container\/([^/]+)\/versions\/(\d+)$/.exec(
         url.pathname,
       );
-    if (versionDeleteMatch && method === "GET") {
-      const key = `${versionDeleteMatch[1]}/${versionDeleteMatch[2]}`;
-      const vid = Number.parseInt(versionDeleteMatch[3], 10);
-      const found = (store.versions.get(key) ?? []).find(
-        (item) => item.id === vid,
-      );
-
-      return found
-        ? Response.json(found)
-        : Response.json({ message: "Not Found" }, { status: 404 });
-    }
-    if (versionDeleteMatch && method === "DELETE") {
-      const key = `${versionDeleteMatch[1]}/${versionDeleteMatch[2]}`;
-      const vid = Number.parseInt(versionDeleteMatch[3], 10);
-      if (store.blockedPackages.has(key)) {
-        return Response.json(
-          {
-            message:
-              "You cannot delete a public package version that has more than 5000 downloads.",
-          },
-          { status: 400 },
-        );
-      }
+    if (versionItemMatch) {
+      const key = `${versionItemMatch[1]}/${versionItemMatch[2]}`;
+      const vid = Number.parseInt(versionItemMatch[3], 10);
       const list = store.versions.get(key) ?? [];
-      if (list.length === 1) {
-        return Response.json(
-          {
-            message:
-              "You cannot delete the last version of a package. You must delete the package instead.",
-          },
-          { status: 400 },
-        );
-      }
-      store.versions.set(
-        key,
-        list.filter((item) => item.id !== vid),
-      );
-      store.deletedVersions.push(vid);
 
-      return new Response(null, { status: 204 });
+      if (method === "GET") {
+        const found = list.find((item) => item.id === vid);
+
+        return found
+          ? Response.json(found)
+          : Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      if (method === "DELETE") {
+        if (store.blockedPackages.has(key)) {
+          return Response.json(
+            {
+              message:
+                "You cannot delete a public package version that has more than 5000 downloads.",
+            },
+            { status: 400 },
+          );
+        }
+        if (list.length === 1) {
+          return Response.json(
+            {
+              message:
+                "You cannot delete the last version of a package. You must delete the package instead.",
+            },
+            { status: 400 },
+          );
+        }
+        store.versions.set(
+          key,
+          list.filter((item) => item.id !== vid),
+        );
+        store.deletedVersions.push(vid);
+
+        return new Response(null, { status: 204 });
+      }
     }
 
     const pkgDeleteMatch =
@@ -297,7 +271,7 @@ const createMockFetch =
       return new Response(null, { status: 204 });
     }
 
-    throw new Error(`unhandled mock fetch ${method} ${reqUrl}`);
+    throw new Error(`unhandled mock fetch ${method} ${req.url}`);
   };
 
 describe("firn worker", () => {
@@ -307,18 +281,44 @@ describe("firn worker", () => {
   let store: MockStore;
   let testEnv: CloudflareWorkerEnv;
 
-  async function callWorker(request: Request): Promise<Response> {
+  async function callWorker(
+    input: Request | string,
+    init?: RequestInit,
+  ): Promise<Response> {
     const ctx = createExecutionContext();
-    const response = await worker.fetch(request, testEnv, ctx);
+    const req =
+      typeof input === "string"
+        ? new Request(`https://cache.so1ve.dev${input}`, init)
+        : input;
+    const response = await worker.fetch(req, testEnv, ctx);
     await waitOnExecutionContext(ctx);
 
     return response;
   }
 
-  async function seedMockOciArtifact(
-    repo: string,
-    payload: Uint8Array,
-  ): Promise<{ blobHex: string; manifestDigest: string; fileHash: string }> {
+  const callAdmin = (path: string, method = "GET") =>
+    callWorker(path, {
+      method,
+      headers: { Authorization: "Bearer admin-secret-token" },
+    });
+
+  const issueOidcJwt = (overrides: {
+    repository?: string;
+    ref?: string;
+    event_name?: string;
+  }) =>
+    signJwt(rsa.privateKey, {
+      iss: "https://oidc.mock",
+      aud: "https://cache.so1ve.dev",
+      exp: unixNow() + 300,
+      repository_owner_id: "58381667",
+      repository: "so1ve/latchshot",
+      ref: "refs/heads/main",
+      event_name: "push",
+      ...overrides,
+    });
+
+  async function seedMockOciArtifact(repo: string, payload: Uint8Array) {
     const digestBytes = new Uint8Array(
       await crypto.subtle.digest("SHA-256", payload),
     );
@@ -326,7 +326,7 @@ describe("firn worker", () => {
     const blobDigest = `sha256:${blobHex}`;
     store.blobs.set(`${repo}/${blobDigest}`, payload);
 
-    const manifestBytes = new TextEncoder().encode(
+    const manifestBytes = encoder.encode(
       JSON.stringify({
         schemaVersion: 2,
         layers: [{ digest: blobDigest, size: payload.length }],
@@ -355,8 +355,8 @@ describe("firn worker", () => {
     repo: string,
     storePath: string,
     content: string,
-  ): Promise<{ narHash: string; blobHex: string }> {
-    const bytes = new TextEncoder().encode(content);
+  ) {
+    const bytes = encoder.encode(content);
     const narDigest = new Uint8Array(
       await crypto.subtle.digest("SHA-256", bytes),
     );
@@ -366,29 +366,27 @@ describe("firn worker", () => {
       bytes,
     );
 
-    const commitRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/uploads/commit", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${bearer}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          entries: [
-            {
-              store_path: storePath,
-              nar_hash: narHash,
-              nar_size: bytes.length,
-              file_hash: fileHash,
-              file_size: bytes.length,
-              manifest_digest: manifestDigest,
-              blob_digest: blobHex,
-              references: [],
-            },
-          ],
-        } satisfies CommitRequest),
-      }),
-    );
+    const commitRes = await callWorker("/api/v1/uploads/commit", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${bearer}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        entries: [
+          {
+            store_path: storePath,
+            nar_hash: narHash,
+            nar_size: bytes.length,
+            file_hash: fileHash,
+            file_size: bytes.length,
+            manifest_digest: manifestDigest,
+            blob_digest: blobHex,
+            references: [],
+          },
+        ],
+      } satisfies CommitRequest),
+    });
 
     expect(commitRes.status).toBe(200);
 
@@ -476,39 +474,21 @@ describe("firn worker", () => {
   });
 
   it("rejects pull_request_target and non-main branch pushes", async () => {
-    const prTarget = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
-      ref: "refs/heads/main",
-      event_name: "pull_request_target",
-    });
-    const feature = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
-      ref: "refs/heads/feature",
-      event_name: "push",
-    });
+    const prTarget = await issueOidcJwt({ event_name: "pull_request_target" });
+    const feature = await issueOidcJwt({ ref: "refs/heads/feature" });
 
     for (const [jwt, expectedCode] of [
       [prTarget, null],
       [feature, "non-main-ref"],
     ] as const) {
-      const res = await callWorker(
-        new Request("https://cache.so1ve.dev/api/v1/uploads/plan", {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${jwt}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ store_paths: [] } satisfies PlanRequest),
-        }),
-      );
+      const res = await callWorker("/api/v1/uploads/plan", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${jwt}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ store_paths: [] } satisfies PlanRequest),
+      });
 
       expect(res.status).toBe(403);
       expect(res.headers.get("x-firn-error")).toBe(expectedCode);
@@ -516,9 +496,7 @@ describe("firn worker", () => {
   });
 
   it("serves public keys, main narinfo, and 302 CDN redirects after OIDC push", async () => {
-    const keysRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/public-keys"),
-    );
+    const keysRes = await callWorker("/api/v1/public-keys");
 
     expect(keysRes.status).toBe(200);
     await expect(keysRes.json()).resolves.toEqual({
@@ -526,36 +504,22 @@ describe("firn worker", () => {
       pr_public_key: prKey.publicString(),
     });
 
-    const infoRes = await callWorker(
-      new Request("https://cache.so1ve.dev/nix-cache-info"),
-    );
+    const infoRes = await callWorker("/nix-cache-info");
 
     await expect(infoRes.text()).resolves.toContain("Priority: 41");
 
-    const jwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
-      ref: "refs/heads/main",
-      event_name: "push",
-    });
+    const jwt = await issueOidcJwt({});
     const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const storePath = `/nix/store/${hash}-hello`;
 
-    const planRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/uploads/plan", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${jwt}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          store_paths: [storePath],
-        } satisfies PlanRequest),
-      }),
-    );
+    const planRes = await callWorker("/api/v1/uploads/plan", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${jwt}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ store_paths: [storePath] } satisfies PlanRequest),
+    });
 
     expect(planRes.status).toBe(200);
 
@@ -571,9 +535,7 @@ describe("firn worker", () => {
       "fake-nar-content-main",
     );
 
-    const narinfoRes = await callWorker(
-      new Request(`https://cache.so1ve.dev/${hash}.narinfo`),
-    );
+    const narinfoRes = await callWorker(`/${hash}.narinfo`);
 
     expect(narinfoRes.status).toBe(200);
 
@@ -584,7 +546,7 @@ describe("firn worker", () => {
     const sig = text
       .split("\n")
       .find((line) => line.startsWith("Sig: "))
-      ?.slice("Sig: ".length);
+      ?.slice(5);
 
     expect(sig).toBeDefined();
 
@@ -599,9 +561,7 @@ describe("firn worker", () => {
       verifySignature(mainKey.publicString(), fp, sig!),
     ).resolves.toBeTruthy();
 
-    const narRes = await callWorker(
-      new Request(`https://cache.so1ve.dev/nar/${blobHex}.nar.zst`),
-    );
+    const narRes = await callWorker(`/nar/${blobHex}.nar.zst`);
 
     expect(narRes.status).toBe(302);
     expect(narRes.headers.get("location")).toContain(
@@ -610,21 +570,8 @@ describe("firn worker", () => {
   });
 
   it("isolates PR overlays and signs them with PR key while falling back to main", async () => {
-    const mainJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
-      ref: "refs/heads/main",
-      event_name: "push",
-    });
-    const prJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
+    const mainJwt = await issueOidcJwt({});
+    const prJwt = await issueOidcJwt({
       ref: "refs/pull/7/merge",
       event_name: "pull_request",
     });
@@ -645,32 +592,16 @@ describe("firn worker", () => {
     );
 
     expect(
-      (
-        await callWorker(
-          new Request(
-            `https://cache.so1ve.dev/pr/so1ve/latchshot/7/${mainHash}.narinfo`,
-          ),
-        )
-      ).status,
+      (await callWorker(`/pr/so1ve/latchshot/7/${mainHash}.narinfo`)).status,
     ).toBe(200);
-    expect(
-      (
-        await callWorker(
-          new Request(`https://cache.so1ve.dev/${prHash}.narinfo`),
-        )
-      ).status,
-    ).toBe(404);
+    expect((await callWorker(`/${prHash}.narinfo`)).status).toBe(404);
 
-    const prRes = await callWorker(
-      new Request(
-        `https://cache.so1ve.dev/pr/so1ve/latchshot/7/${prHash}.narinfo`,
-      ),
-    );
+    const prRes = await callWorker(`/pr/so1ve/latchshot/7/${prHash}.narinfo`);
     const prText = await prRes.text();
     const prSig = prText
       .split("\n")
       .find((line) => line.startsWith("Sig: "))!
-      .slice("Sig: ".length);
+      .slice(5);
     const prFp = fingerprint(
       `/nix/store/${prHash}-pr`,
       prNarHash,
@@ -687,16 +618,14 @@ describe("firn worker", () => {
   });
 
   it("handles manual token exchange, webhook PR cleanup, GC fallbacks, and admin API", async () => {
-    const manualRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/uploads/plan", {
-        method: "POST",
-        headers: {
-          "Authorization": "Bearer manual-secret-token",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ store_paths: [] } satisfies PlanRequest),
-      }),
-    );
+    const manualRes = await callWorker("/api/v1/uploads/plan", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer manual-secret-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ store_paths: [] } satisfies PlanRequest),
+    });
 
     expect(manualRes.status).toBe(200);
 
@@ -705,13 +634,7 @@ describe("firn worker", () => {
     expect(manualPlan.ghcr_repository).toBe("so1ve/manual-cache");
     expect(manualPlan.ghcr_token).toBe("mock-oci-token");
 
-    // Upload an ephemeral PR path, close PR via webhook, run GC -> last-version fallback deletes package.
-    const prJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
+    const prJwt = await issueOidcJwt({
       ref: "refs/pull/9/merge",
       event_name: "pull_request",
     });
@@ -727,25 +650,18 @@ describe("firn worker", () => {
       repository: { name: "latchshot", owner: { id: 58_381_667 } },
       pull_request: { number: 9 },
     });
-    const webhookRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/webhooks/github", {
-        method: "POST",
-        headers: {
-          "X-GitHub-Event": "pull_request",
-          "X-Hub-Signature-256": await signWebhook("whsec_test", webhookBody),
-        },
-        body: webhookBody,
-      }),
-    );
+    const webhookRes = await callWorker("/api/v1/webhooks/github", {
+      method: "POST",
+      headers: {
+        "X-GitHub-Event": "pull_request",
+        "X-Hub-Signature-256": await signWebhook("whsec_test", webhookBody),
+      },
+      body: webhookBody,
+    });
 
     expect(webhookRes.status).toBe(204);
 
-    const gcRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
-        method: "POST",
-        headers: { Authorization: "Bearer admin-secret-token" },
-      }),
-    );
+    const gcRes = await callAdmin("/api/v1/admin/gc", "POST");
 
     expect(gcRes.status).toBe(200);
 
@@ -754,12 +670,7 @@ describe("firn worker", () => {
     expect(report.blobs_deleted).toBe(1);
     expect(store.deletedPackages).toEqual(["so1ve/latchshot-cache"]);
 
-    // Public >5000 downloads rejection marks gc_blocked and stops retrying.
-    const popJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
+    const popJwt = await issueOidcJwt({
       repository: "so1ve/popular",
       ref: "refs/pull/10/merge",
       event_name: "pull_request",
@@ -772,55 +683,26 @@ describe("firn worker", () => {
     );
     store.blockedPackages.add("so1ve/popular-cache");
 
-    const delPrRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/admin/prs/so1ve/popular/10", {
-        method: "DELETE",
-        headers: { Authorization: "Bearer admin-secret-token" },
-      }),
-    );
-
-    expect(delPrRes.status).toBe(200);
+    expect(
+      (await callAdmin("/api/v1/admin/prs/so1ve/popular/10", "DELETE")).status,
+    ).toBe(200);
 
     const firstGc = await (
-      await callWorker(
-        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
-          method: "POST",
-          headers: { Authorization: "Bearer admin-secret-token" },
-        }),
-      )
+      await callAdmin("/api/v1/admin/gc", "POST")
     ).json<GcReport>();
 
     expect(firstGc.blobs_blocked).toBe(1);
     expect(firstGc.blob_errors).toBe(0);
 
-    const statusRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/admin/status", {
-        headers: { Authorization: "Bearer admin-secret-token" },
-      }),
-    );
-    const status = await statusRes.json<AdminStatusResponse>();
+    const status = await (
+      await callAdmin("/api/v1/admin/status")
+    ).json<AdminStatusResponse>();
 
     expect(status.owners[0]?.blocked_blobs).toHaveLength(1);
 
-    // Admin store path deletion: require at least one filter, then delete matching paths.
-    const bareDelete = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/admin/paths", {
-        method: "DELETE",
-        headers: { Authorization: "Bearer admin-secret-token" },
-      }),
-    );
+    expect((await callAdmin("/api/v1/admin/paths", "DELETE")).status).toBe(400);
 
-    expect(bareDelete.status).toBe(400);
-
-    const mainJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
-      ref: "refs/heads/main",
-      event_name: "push",
-    });
+    const mainJwt = await issueOidcJwt({});
     await uploadAndCommit(
       mainJwt,
       "so1ve/latchshot-cache",
@@ -834,11 +716,9 @@ describe("firn worker", () => {
       "real-app-nar",
     );
 
-    const delMatching = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/admin/paths?q=.patch", {
-        method: "DELETE",
-        headers: { Authorization: "Bearer admin-secret-token" },
-      }),
+    const delMatching = await callAdmin(
+      "/api/v1/admin/paths?q=.patch",
+      "DELETE",
     );
 
     expect(delMatching.status).toBe(200);
@@ -863,6 +743,8 @@ describe("firn worker", () => {
     const depHash = "11111111111111111111111111111111";
     const liveHash = "22222222222222222222222222222222";
     const orphanHash = "33333333333333333333333333333333";
+    const zeroNarHash =
+      "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73";
 
     const db = d1Adapter(env.DB);
     await commitEntries(db, [
@@ -876,9 +758,9 @@ describe("firn worker", () => {
         fileSize: 100,
         storeHash: depHash,
         storePath: `/nix/store/${depHash}-dep`,
-        narHash: "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73",
+        narHash: zeroNarHash,
         narSize: 200,
-        fileHash: "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73",
+        fileHash: zeroNarHash,
         deriver: null,
         references: [],
         signature: "cache.so1ve.dev-1:sig",
@@ -894,9 +776,9 @@ describe("firn worker", () => {
         fileSize: 100,
         storeHash: liveHash,
         storePath: `/nix/store/${liveHash}-app`,
-        narHash: "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73",
+        narHash: zeroNarHash,
         narSize: 200,
-        fileHash: "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73",
+        fileHash: zeroNarHash,
         deriver: null,
         references: [`${depHash}-dep`],
         signature: "cache.so1ve.dev-1:sig",
@@ -912,9 +794,9 @@ describe("firn worker", () => {
         fileSize: 100,
         storeHash: orphanHash,
         storePath: `/nix/store/${orphanHash}-old`,
-        narHash: "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73",
+        narHash: zeroNarHash,
         narSize: 200,
-        fileHash: "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73",
+        fileHash: zeroNarHash,
         deriver: null,
         references: [],
         signature: "cache.so1ve.dev-1:sig",
@@ -934,21 +816,8 @@ describe("firn worker", () => {
   });
 
   it("renders dashboard HTML and filters public store paths", async () => {
-    const mainJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
-      ref: "refs/heads/main",
-      event_name: "push",
-    });
-    const prJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/latchshot",
+    const mainJwt = await issueOidcJwt({});
+    const prJwt = await issueOidcJwt({
       ref: "refs/pull/42/merge",
       event_name: "pull_request",
     });
@@ -966,7 +835,7 @@ describe("firn worker", () => {
       "pr-nar",
     );
 
-    const htmlRes = await callWorker(new Request("https://cache.so1ve.dev/"));
+    const htmlRes = await callWorker("/");
 
     expect(htmlRes.status).toBe(200);
     expect(htmlRes.headers.get("content-type")).toContain("text/html");
@@ -982,9 +851,7 @@ describe("firn worker", () => {
     expect(body).toContain("#42");
 
     const filteredRes = await callWorker(
-      new Request(
-        "https://cache.so1ve.dev/api/v1/public/paths?q=preview&scope=pr:so1ve:latchshot:42",
-      ),
+      "/api/v1/public/paths?q=preview&scope=pr:so1ve:latchshot:42",
     );
 
     expect(filteredRes.status).toBe(200);
@@ -994,43 +861,30 @@ describe("firn worker", () => {
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.store_path).toContain("pr-preview");
 
-    const bySizeRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/public/paths?sort=size"),
-    );
-
-    expect(bySizeRes.status).toBe(200);
-
-    const bySize = await bySizeRes.json<StorePathSummary[]>();
+    const bySize = await (
+      await callWorker("/api/v1/public/paths?sort=size")
+    ).json<StorePathSummary[]>();
 
     expect(bySize.map((item) => item.store_path)).toEqual([
       "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hello-world",
       "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-pr-preview",
     ]);
 
-    const byAccessedRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/public/paths?sort=accessed"),
-    );
-
-    expect(byAccessedRes.status).toBe(200);
-
-    const byAccessed = await byAccessedRes.json<StorePathSummary[]>();
+    const byAccessed = await (
+      await callWorker("/api/v1/public/paths?sort=accessed")
+    ).json<StorePathSummary[]>();
 
     expect(byAccessed.map((item) => item.store_path)).toEqual([
       "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-pr-preview",
       "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-hello-world",
     ]);
 
-    const badSortRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/public/paths?sort=bogus"),
+    expect((await callWorker("/api/v1/public/paths?sort=bogus")).status).toBe(
+      400,
     );
-
-    expect(badSortRes.status).toBe(400);
-
-    const unknownOwnerRes = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/public/paths?owner=nobody"),
+    expect((await callWorker("/api/v1/public/paths?owner=nobody")).status).toBe(
+      400,
     );
-
-    expect(unknownOwnerRes.status).toBe(400);
   });
 
   it("retries OCI manifest pushes on GHCR 429 rate limits", async () => {
@@ -1040,14 +894,9 @@ describe("firn worker", () => {
     vi.stubGlobal(
       "fetch",
       async (input: RequestInfo | URL, init?: RequestInit) => {
-        const reqUrl =
-          typeof input === "string"
-            ? input
-            : input instanceof URL
-              ? input.toString()
-              : input.url;
-        const method = (init?.method ?? "GET").toUpperCase();
-        const url = new URL(reqUrl);
+        const req = new Request(input, init);
+        const method = req.method.toUpperCase();
+        const url = new URL(req.url);
 
         if (method === "HEAD" && url.pathname.includes("/blobs/")) {
           if (
@@ -1084,7 +933,7 @@ describe("firn worker", () => {
           });
         }
 
-        throw new Error(`unexpected ${method} ${reqUrl}`);
+        throw new Error(`unexpected ${method} ${req.url}`);
       },
     );
 
@@ -1116,27 +965,17 @@ describe("firn worker", () => {
     vi.stubGlobal(
       "fetch",
       async (input: RequestInfo | URL, init?: RequestInit) => {
-        const reqUrl =
-          typeof input === "string"
-            ? input
-            : input instanceof URL
-              ? input.toString()
-              : input.url;
-        const url = new URL(reqUrl);
-        if (url.pathname === "/token") {
-          const headers = new Headers(
-            init?.headers ?? (input instanceof Request ? input.headers : {}),
+        const req = new Request(input, init);
+        const url = new URL(req.url);
+        if (url.pathname === "/token" && !req.headers.get("authorization")) {
+          return Response.json(
+            {
+              errors: [
+                { code: "UNAUTHORIZED", message: "authentication required" },
+              ],
+            },
+            { status: tokenStatus },
           );
-          if (!headers.get("authorization")) {
-            return Response.json(
-              {
-                errors: [
-                  { code: "UNAUTHORIZED", message: "authentication required" },
-                ],
-              },
-              { status: tokenStatus },
-            );
-          }
         }
         if (/^\/app\/installations\/\d+\/access_tokens$/.test(url.pathname)) {
           installTokenCalls += 1;
@@ -1146,26 +985,15 @@ describe("firn worker", () => {
       },
     );
 
-    const jwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/private-repo",
-      ref: "refs/heads/main",
-      event_name: "push",
-    });
-    const hash = "ffffffffffffffffffffffffffffffff";
+    const jwt = await issueOidcJwt({ repository: "so1ve/private-repo" });
     const { blobHex } = await uploadAndCommit(
       jwt,
       "so1ve/private-repo-cache",
-      `/nix/store/${hash}-priv`,
+      "/nix/store/ffffffffffffffffffffffffffffffff-priv",
       "private-nar-payload",
     );
 
-    const narRes = await callWorker(
-      new Request(`https://cache.so1ve.dev/nar/${blobHex}.nar.zst`),
-    );
+    const narRes = await callWorker(`/nar/${blobHex}.nar.zst`);
 
     expect(narRes.status).toBe(302);
     expect(narRes.headers.get("location")).toContain(
@@ -1173,11 +1001,8 @@ describe("firn worker", () => {
     );
     expect(installTokenCalls).toBe(2);
 
-    // Non-auth errors (e.g. 404) must bubble up without minting an installation token.
     tokenStatus = 404;
-    const failedRes = await callWorker(
-      new Request(`https://cache.so1ve.dev/nar/${blobHex}.nar.zst`),
-    );
+    const failedRes = await callWorker(`/nar/${blobHex}.nar.zst`);
 
     expect(failedRes.status).toBe(500);
     expect(installTokenCalls).toBe(2);
@@ -1190,14 +1015,9 @@ describe("firn worker", () => {
     vi.stubGlobal(
       "fetch",
       async (input: RequestInfo | URL, init?: RequestInit) => {
-        const reqUrl =
-          typeof input === "string"
-            ? input
-            : input instanceof URL
-              ? input.toString()
-              : input.url;
-        const url = new URL(reqUrl);
-        if (url.pathname.endsWith("/versions")) {
+        if (
+          new URL(new Request(input, init).url).pathname.endsWith("/versions")
+        ) {
           versionsListCalls += 1;
         }
 
@@ -1205,11 +1025,7 @@ describe("firn worker", () => {
       },
     );
 
-    const prJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
+    const prJwt = await issueOidcJwt({
       repository: "so1ve/paged",
       ref: "refs/pull/12/merge",
       event_name: "pull_request",
@@ -1234,7 +1050,6 @@ describe("firn worker", () => {
       "third-nar",
     );
 
-    // Pad versions with >100 extra entries on subsequent pages so full pagination would take >=2 pages.
     const existing = store.versions.get("so1ve/paged-cache") ?? [];
     for (let i = 0; i < 120; i += 1) {
       existing.push({
@@ -1244,41 +1059,22 @@ describe("firn worker", () => {
     }
     store.versions.set("so1ve/paged-cache", existing);
 
-    const delPr = await callWorker(
-      new Request("https://cache.so1ve.dev/api/v1/admin/prs/so1ve/paged/12", {
-        method: "DELETE",
-        headers: { Authorization: "Bearer admin-secret-token" },
-      }),
-    );
+    expect(
+      (await callAdmin("/api/v1/admin/prs/so1ve/paged/12", "DELETE")).status,
+    ).toBe(200);
 
-    expect(delPr.status).toBe(200);
-
-    // Budget = 4: 1 install token + 1 version page + 1 delete (reserving 2 for last-version fallback).
     testEnv.GC_MAX_SUBREQUESTS = "4";
-
     const round1 = await (
-      await callWorker(
-        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
-          method: "POST",
-          headers: { Authorization: "Bearer admin-secret-token" },
-        }),
-      )
+      await callAdmin("/api/v1/admin/gc", "POST")
     ).json<GcReport>();
 
-    // Early-exit stops after page 1 even though page 2 exists; deletes 1 and skips 2.
     expect(versionsListCalls).toBe(1);
     expect(round1.blobs_deleted).toBe(1);
     expect(round1.blobs_skipped).toBe(2);
 
-    // Round 2 has cached ghcr_version_id for both remaining blobs -> 0 extra /versions list calls.
     testEnv.GC_MAX_SUBREQUESTS = "5";
     const round2 = await (
-      await callWorker(
-        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
-          method: "POST",
-          headers: { Authorization: "Bearer admin-secret-token" },
-        }),
-      )
+      await callAdmin("/api/v1/admin/gc", "POST")
     ).json<GcReport>();
 
     expect(versionsListCalls).toBe(1);
@@ -1290,16 +1086,7 @@ describe("firn worker", () => {
   });
 
   it("sweeps aged untracked nar-* GHCR orphans while protecting live, recent, and non-Firn versions", async () => {
-    const mainJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/orphan-test",
-      ref: "refs/heads/main",
-      event_name: "push",
-    });
-
+    const mainJwt = await issueOidcJwt({ repository: "so1ve/orphan-test" });
     await uploadAndCommit(
       mainJwt,
       "so1ve/orphan-test-cache",
@@ -1307,13 +1094,12 @@ describe("firn worker", () => {
       "live-pkg-nar",
     );
 
-    const oldIso = new Date((unixNow() - 2 * 60 * 60) * 1000).toISOString();
-    const recentIso = new Date((unixNow() - 5 * 60) * 1000).toISOString();
+    const oldIso = new Date((unixNow() - 7200) * 1000).toISOString();
+    const recentIso = new Date((unixNow() - 300) * 1000).toISOString();
     const existing = store.versions.get("so1ve/orphan-test-cache") ?? [];
     existing[0].updated_at = oldIso;
     existing[0].metadata = { container: { tags: ["nar-live"] } };
 
-    // 3 aged Firn orphans, 1 recent in-flight nar-* version, and 1 non-Firn tagged image.
     existing.push(
       {
         id: 2001,
@@ -1348,29 +1134,17 @@ describe("firn worker", () => {
     );
     store.versions.set("so1ve/orphan-test-cache", existing);
 
-    // Budget = 5: 1 install token + 1 list page + 2 deletes (reserving 2 for last-version fallback).
     testEnv.GC_MAX_SUBREQUESTS = "5";
     const round1 = await (
-      await callWorker(
-        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
-          method: "POST",
-          headers: { Authorization: "Bearer admin-secret-token" },
-        }),
-      )
+      await callAdmin("/api/v1/admin/gc", "POST")
     ).json<GcReport>();
 
     expect(round1.blobs_deleted).toBe(2);
     expect(round1.blobs_skipped).toBe(1);
     expect(round1.blob_errors).toBe(0);
 
-    // Round 2 drains the remaining orphan and leaves live, recent, and non-Firn versions intact.
     const round2 = await (
-      await callWorker(
-        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
-          method: "POST",
-          headers: { Authorization: "Bearer admin-secret-token" },
-        }),
-      )
+      await callAdmin("/api/v1/admin/gc", "POST")
     ).json<GcReport>();
 
     expect(round2.blobs_deleted).toBe(1);
@@ -1390,15 +1164,11 @@ describe("firn worker", () => {
     vi.stubGlobal(
       "fetch",
       async (input: RequestInfo | URL, init?: RequestInit) => {
-        const reqUrl =
-          typeof input === "string"
-            ? input
-            : input instanceof URL
-              ? input.toString()
-              : input.url;
-        const method = (init?.method ?? "GET").toUpperCase();
-        const url = new URL(reqUrl);
-        if (method === "DELETE" && url.pathname.includes("/versions/")) {
+        const req = new Request(input, init);
+        if (
+          req.method.toUpperCase() === "DELETE" &&
+          new URL(req.url).pathname.includes("/versions/")
+        ) {
           deleteCalls += 1;
 
           return Response.json(
@@ -1411,16 +1181,7 @@ describe("firn worker", () => {
       },
     );
 
-    const mainJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/denied",
-      ref: "refs/heads/main",
-      event_name: "push",
-    });
-
+    const mainJwt = await issueOidcJwt({ repository: "so1ve/denied" });
     await uploadAndCommit(
       mainJwt,
       "so1ve/denied-cache",
@@ -1428,7 +1189,7 @@ describe("firn worker", () => {
       "live-nar",
     );
 
-    const oldIso = new Date((unixNow() - 2 * 60 * 60) * 1000).toISOString();
+    const oldIso = new Date((unixNow() - 7200) * 1000).toISOString();
     const existing = store.versions.get("so1ve/denied-cache") ?? [];
     existing.push(
       {
@@ -1447,19 +1208,13 @@ describe("firn worker", () => {
     store.versions.set("so1ve/denied-cache", existing);
 
     const report = await (
-      await callWorker(
-        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
-          method: "POST",
-          headers: { Authorization: "Bearer admin-secret-token" },
-        }),
-      )
+      await callAdmin("/api/v1/admin/gc", "POST")
     ).json<GcReport>();
 
     expect(report.blobs_deleted).toBe(0);
     expect(report.blob_errors).toBe(1);
     expect(report.last_error).toContain("404");
     expect(report.last_error).toContain("Package not found.");
-    // Fails fast on the first 404 instead of retrying every remaining orphan in the package.
     expect(deleteCalls).toBe(1);
   });
 
@@ -1471,37 +1226,20 @@ describe("firn worker", () => {
     vi.stubGlobal(
       "fetch",
       async (input: RequestInfo | URL, init?: RequestInit) => {
-        const reqUrl =
-          typeof input === "string"
-            ? input
-            : input instanceof URL
-              ? input.toString()
-              : input.url;
-        const url = new URL(reqUrl);
+        const req = new Request(input, init);
+        const url = new URL(req.url);
         if (/^\/app\/installations\/\d+\/access_tokens$/.test(url.pathname)) {
           installTokenCalls += 1;
         }
         if (url.pathname.includes("/packages/container/")) {
-          const headers = new Headers(
-            init?.headers ?? (input instanceof Request ? input.headers : {}),
-          );
-          authHeaders.push(headers.get("authorization") ?? "");
+          authHeaders.push(req.headers.get("authorization") ?? "");
         }
 
         return baseFetch(input, init);
       },
     );
 
-    const mainJwt = await signJwt(rsa.privateKey, {
-      iss: "https://oidc.mock",
-      aud: "https://cache.so1ve.dev",
-      exp: unixNow() + 300,
-      repository_owner_id: "58381667",
-      repository: "so1ve/pat-gc",
-      ref: "refs/heads/main",
-      event_name: "push",
-    });
-
+    const mainJwt = await issueOidcJwt({ repository: "so1ve/pat-gc" });
     await uploadAndCommit(
       mainJwt,
       "so1ve/pat-gc-cache",
@@ -1509,7 +1247,7 @@ describe("firn worker", () => {
       "kept-nar",
     );
 
-    const oldIso = new Date((unixNow() - 2 * 60 * 60) * 1000).toISOString();
+    const oldIso = new Date((unixNow() - 7200) * 1000).toISOString();
     const existing = store.versions.get("so1ve/pat-gc-cache") ?? [];
     existing.push({
       id: 4001,
@@ -1519,18 +1257,12 @@ describe("firn worker", () => {
     });
     store.versions.set("so1ve/pat-gc-cache", existing);
 
-    // Disable GitHub App and supply GITHUB_PACKAGES_TOKEN instead.
     testEnv.GITHUB_APP_ID = "";
     testEnv.GITHUB_APP_PRIVATE_KEY = "";
     testEnv.GITHUB_PACKAGES_TOKEN = "ghp_test_classic_pat";
 
     const report = await (
-      await callWorker(
-        new Request("https://cache.so1ve.dev/api/v1/admin/gc", {
-          method: "POST",
-          headers: { Authorization: "Bearer admin-secret-token" },
-        }),
-      )
+      await callAdmin("/api/v1/admin/gc", "POST")
     ).json<GcReport>();
 
     expect(report.blobs_deleted).toBe(1);

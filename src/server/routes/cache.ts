@@ -11,7 +11,6 @@ import {
 import { OciClient } from "../../shared/oci.ts";
 import type { PublicKeysResponse } from "../../shared/protocol.ts";
 import type { AppBindings } from "../app.ts";
-import type { LoadedConfig } from "../config.ts";
 import { ghcrRepository } from "../config.ts";
 import {
   MAIN_SCOPE,
@@ -19,26 +18,24 @@ import {
   getBlobForDownload,
   getNarInfo,
   prScope,
-  storedToNarInfo,
   touchAccessedThrottled,
 } from "../db.ts";
-import { acquirePullToken } from "../ghcr.ts";
+import { acquirePullToken } from "../github.ts";
 
 const textResponse = (body: string, contentType: string): Response =>
-  new Response(body, {
-    status: 200,
-    headers: { "Content-Type": contentType },
-  });
+  new Response(body, { status: 200, headers: { "Content-Type": contentType } });
 
-function ensureOwnerExists(
-  config: LoadedConfig,
-  owner: string,
-): Response | null {
-  if (!config.ownersByName.has(owner)) {
-    return new Response("unknown cache owner", { status: 404 });
+function resolvePrScope(c: Context<AppBindings>): string | Response {
+  const owner = c.req.param("owner") ?? "";
+  if (!c.get("config").ownersByName.has(owner)) {
+    return c.text("unknown cache owner", 404);
+  }
+  const prNumber = Number.parseInt(c.req.param("number") ?? "", 10);
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
+    return c.text("invalid pull request number", 404);
   }
 
-  return null;
+  return prScope(owner, c.req.param("repo") ?? "", prNumber);
 }
 
 async function serveNarInfo(
@@ -68,7 +65,11 @@ async function serveNarInfo(
   }
 
   return textResponse(
-    renderNarInfo(storedToNarInfo(stored)),
+    renderNarInfo({
+      ...stored,
+      url: `nar/${stored.blobDigest}.nar.zst`,
+      sig: stored.signature,
+    }),
     "text/x-nix-narinfo",
   );
 }
@@ -96,88 +97,60 @@ async function serveNar(
   const config = c.get("config");
   const oci = new OciClient(config.registryUrl);
   const repo = ghcrRepository(blob.ownerId, blob.ghcrPackage);
-  const owner = config.ownersByName.get(blob.ownerId);
-  const pullToken = await acquirePullToken(config, owner, oci, repo);
-  const redirectUrl = await oci.resolveBlobRedirect(
+  const pullToken = await acquirePullToken(
+    config,
+    config.ownersByName.get(blob.ownerId),
+    oci,
     repo,
-    blob.blobDigest,
-    pullToken,
   );
 
-  return c.redirect(redirectUrl, 302);
+  return c.redirect(
+    await oci.resolveBlobRedirect(repo, blob.blobDigest, pullToken),
+    302,
+  );
 }
 
 export function handlePublicKeys(c: Context<AppBindings>): Response {
   const config = c.get("config");
-  const payload: PublicKeysResponse = {
+
+  return c.json({
     main_public_key: config.mainKey.publicString(),
     pr_public_key: config.prKey.publicString(),
-  };
-
-  return c.json(payload);
+  } satisfies PublicKeysResponse);
 }
 
 export const handleMainCacheInfo = (): Response =>
   textResponse(renderNixCacheInfo(CACHE_PRIORITY), "text/x-nix-cache-info");
 
 export function handlePrCacheInfo(c: Context<AppBindings>): Response {
-  const missing = ensureOwnerExists(
-    c.get("config"),
-    c.req.param("owner") ?? "",
-  );
-  if (missing) {
-    return missing;
+  const owner = c.req.param("owner") ?? "";
+  if (!c.get("config").ownersByName.has(owner)) {
+    return c.text("unknown cache owner", 404);
   }
 
-  return textResponse(
-    renderNixCacheInfo(CACHE_PRIORITY),
-    "text/x-nix-cache-info",
-  );
+  return handleMainCacheInfo();
 }
 
-export const handleMainNarInfo = async (
-  c: Context<AppBindings>,
-): Promise<Response> =>
+export const handleMainNarInfo = (c: Context<AppBindings>): Promise<Response> =>
   serveNarInfo(c, MAIN_SCOPE, c.req.param("narinfo") ?? "");
 
 export async function handlePrNarInfo(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  const owner = c.req.param("owner") ?? "";
-  const missing = ensureOwnerExists(c.get("config"), owner);
-  if (missing) {
-    return missing;
-  }
-  const prNumber = Number.parseInt(c.req.param("number") ?? "", 10);
-  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
-    return c.text("invalid pull request number", 404);
-  }
+  const scope = resolvePrScope(c);
 
-  return serveNarInfo(
-    c,
-    prScope(owner, c.req.param("repo") ?? "", prNumber),
-    c.req.param("narinfo") ?? "",
-  );
+  return typeof scope === "string"
+    ? serveNarInfo(c, scope, c.req.param("narinfo") ?? "")
+    : scope;
 }
 
-export const handleMainNar = async (
-  c: Context<AppBindings>,
-): Promise<Response> => serveNar(c, MAIN_SCOPE, c.req.param("file") ?? "");
+export const handleMainNar = (c: Context<AppBindings>): Promise<Response> =>
+  serveNar(c, MAIN_SCOPE, c.req.param("file") ?? "");
 
 export async function handlePrNar(c: Context<AppBindings>): Promise<Response> {
-  const owner = c.req.param("owner") ?? "";
-  const missing = ensureOwnerExists(c.get("config"), owner);
-  if (missing) {
-    return missing;
-  }
-  const prNumber = Number.parseInt(c.req.param("number") ?? "", 10);
-  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
-    return c.text("invalid pull request number", 404);
-  }
+  const scope = resolvePrScope(c);
 
-  return serveNar(
-    c,
-    prScope(owner, c.req.param("repo") ?? "", prNumber),
-    c.req.param("file") ?? "",
-  );
+  return typeof scope === "string"
+    ? serveNar(c, scope, c.req.param("file") ?? "")
+    : scope;
 }

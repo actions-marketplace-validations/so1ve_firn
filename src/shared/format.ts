@@ -1,7 +1,26 @@
 const SECONDS_PER_MINUTE = 60;
-const SECONDS_PER_HOUR = 60 * 60;
-const SECONDS_PER_DAY = 24 * 60 * 60;
+const SECONDS_PER_HOUR = 3600;
+const SECONDS_PER_DAY = 86_400;
 const STORE_PREFIX = "/nix/store/";
+
+export const MAIN_SCOPE = "main";
+
+export const prScope = (
+  ownerId: string,
+  repo: string,
+  prNumber: number,
+): string => `pr:${ownerId}:${repo}:${prNumber}`;
+
+export function parsePrScope(
+  scope: string,
+): { owner: string; repo: string; number: string } | null {
+  const match = /^pr:([^:]+):([^:]+):(\d+)$/.exec(scope);
+
+  return match ? { owner: match[1], repo: match[2], number: match[3] } : null;
+}
+
+export const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 export function formatBytes(bytes: number): string {
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -23,10 +42,8 @@ export function formatDurationMs(ms: number): string {
   if (seconds < SECONDS_PER_MINUTE) {
     return `${seconds.toFixed(1)}s`;
   }
-  const mins = Math.floor(seconds / SECONDS_PER_MINUTE);
-  const rem = Math.round(seconds % SECONDS_PER_MINUTE);
 
-  return `${mins}m${rem}s`;
+  return `${Math.floor(seconds / SECONDS_PER_MINUTE)}m${Math.round(seconds % SECONDS_PER_MINUTE)}s`;
 }
 
 export function formatAge(now: number, timestamp: number): string {
@@ -79,9 +96,8 @@ export function splitStorePath(storePath: string): {
   const base = storePath.startsWith(STORE_PREFIX)
     ? storePath.slice(STORE_PREFIX.length)
     : storePath;
-  if (base.length > 33 && base[32] === "-") {
-    return { hash: base.slice(0, 32), name: base.slice(33) };
-  }
 
-  return { hash: "", name: base };
+  return base.length > 33 && base[32] === "-"
+    ? { hash: base.slice(0, 32), name: base.slice(33) }
+    : { hash: "", name: base };
 }

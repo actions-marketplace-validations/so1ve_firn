@@ -6,16 +6,19 @@ import {
   encodeHex,
   unixNow,
 } from "../shared/nix-format.ts";
-import type { LoadedConfig, OwnerType } from "./config.ts";
+import type { OciClient } from "../shared/oci.ts";
+import { OciHttpError } from "../shared/oci.ts";
+import type { LoadedConfig, LoadedOwner, OwnerType } from "./config.ts";
 
-export interface OidcClaims {
-  iss: string;
-  aud: string | string[];
-  exp: number;
-  repository_owner_id: string;
-  repository: string;
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+export interface VerifiedOidcIdentity {
+  ownerId: number;
+  repoName: string;
   ref: string;
-  event_name: string;
+  eventName: string;
+  prNumber: number | null;
 }
 
 export type DeleteOutcome =
@@ -30,13 +33,17 @@ export interface GhcrPackageVersion {
   tags: string[];
 }
 
-interface JwkKey extends JsonWebKey {
-  kid?: string;
-  alg?: string;
-}
+export class GhcrAuthUnavailableError extends Error {}
 
-interface JwkSet {
-  keys: JwkKey[];
+export function extractBearerToken(
+  header: string | undefined | null,
+): string | null {
+  if (!header?.startsWith("Bearer ")) {
+    return null;
+  }
+  const token = header.slice(7).trim();
+
+  return token || null;
 }
 
 const base64UrlEncode = (bytes: Uint8Array): string =>
@@ -58,18 +65,15 @@ function encodeDerLength(len: number): Uint8Array {
     return new Uint8Array([len]);
   }
   const bytes: number[] = [];
-  let rem = len;
-  while (rem > 0) {
+  for (let rem = len; rem > 0; rem >>= 8) {
     bytes.unshift(rem & 0xff);
-    rem >>= 8;
   }
 
   return new Uint8Array([0x80 | bytes.length, ...bytes]);
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
-  const total = parts.reduce((sum, part) => sum + part.length, 0);
-  const out = new Uint8Array(total);
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
   let offset = 0;
   for (const part of parts) {
     out.set(part, offset);
@@ -81,17 +85,24 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
 
 // Wraps a PKCS#1 RSAPrivateKey DER payload in a PKCS#8 PrivateKeyInfo envelope
 // so Web Crypto `importKey("pkcs8", ...)` accepts GitHub App PEM keys directly.
-function pkcs1ToPkcs8(pkcs1Der: Uint8Array): Uint8Array {
+function pemToPkcs8Der(pem: string): Uint8Array {
+  const trimmed = pem.trim();
+  const der = base64ToBytes(
+    trimmed.replace(/-----[^-]+-----/g, "").replaceAll(/\s+/g, ""),
+  );
+  if (!trimmed.includes("BEGIN RSA PRIVATE KEY")) {
+    return der;
+  }
+
   const version = new Uint8Array([0x02, 0x01, 0x00]);
-  // SEQUENCE { OID 1.2.840.113549.1.1.1 (rsaEncryption), NULL }
   const algorithmId = new Uint8Array([
     0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
     0x01, 0x05, 0x00,
   ]);
   const octetString = concatBytes(
     new Uint8Array([0x04]),
-    encodeDerLength(pkcs1Der.length),
-    pkcs1Der,
+    encodeDerLength(der.length),
+    der,
   );
   const body = concatBytes(version, algorithmId, octetString);
 
@@ -102,24 +113,10 @@ function pkcs1ToPkcs8(pkcs1Der: Uint8Array): Uint8Array {
   );
 }
 
-function pemToPkcs8Der(pem: string): Uint8Array {
-  const trimmed = pem.trim();
-  const isPkcs1 = trimmed.includes("BEGIN RSA PRIVATE KEY");
-  const b64 = trimmed.replace(/-----[^-]+-----/g, "").replaceAll(/\s+/g, "");
-  const binary = atob(b64);
-  const der = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    der[i] = binary.charCodeAt(i);
-  }
-
-  return isPkcs1 ? pkcs1ToPkcs8(der) : der;
-}
-
 export async function timingSafeEqualString(
   a: string,
   b: string,
 ): Promise<boolean> {
-  const encoder = new TextEncoder();
   const [hashA, hashB] = await Promise.all([
     crypto.subtle.digest("SHA-256", encoder.encode(a)),
     crypto.subtle.digest("SHA-256", encoder.encode(b)),
@@ -150,14 +147,14 @@ export async function verifyWebhookSignature(
   if (!headerValue.startsWith("sha256=")) {
     return false;
   }
-  const providedHex = headerValue.slice("sha256=".length).toLowerCase();
+  const providedHex = headerValue.slice(7).toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(providedHex)) {
     return false;
   }
 
   const key = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(secret),
+    encoder.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -167,57 +164,22 @@ export async function verifyWebhookSignature(
   return timingSafeEqualString(encodeHex(mac), providedHex);
 }
 
-export function oidcOwnerId(claims: OidcClaims): number {
-  const parsed = Number.parseInt(claims.repository_owner_id, 10);
-  if (
-    !Number.isSafeInteger(parsed) ||
-    String(parsed) !== claims.repository_owner_id
-  ) {
-    throw new Error(
-      `invalid repository_owner_id '${claims.repository_owner_id}'`,
-    );
-  }
-
-  return parsed;
-}
-
-export function oidcRepoName(claims: OidcClaims): string {
-  const parts = claims.repository.split("/");
-  if (parts.length !== 2 || !parts[1]) {
-    throw new Error(`invalid OIDC repository claim '${claims.repository}'`);
-  }
-
-  return parts[1];
-}
-
-export function oidcPullRequestNumber(claims: OidcClaims): number | null {
-  const match = /^refs\/pull\/(\d+)\/merge$/.exec(claims.ref);
-  if (!match?.[1]) {
-    return null;
-  }
-
-  return Number.parseInt(match[1], 10);
-}
-
 export async function verifyOidcToken(
   issuer: string,
   audience: string,
   token: string,
-): Promise<OidcClaims> {
+): Promise<VerifiedOidcIdentity> {
   const parts = token.split(".");
   if (parts.length !== 3) {
     throw new Error("malformed OIDC JWT");
   }
   const [headerSeg, payloadSeg, sigSeg] = parts as [string, string, string];
-  const header = JSON.parse(
-    new TextDecoder().decode(base64UrlDecode(headerSeg)),
-  ) as { alg?: string; kid?: string };
-
-  if (header.alg !== "RS256") {
-    throw new Error(`unsupported OIDC JWT algorithm '${header.alg ?? ""}'`);
-  }
-  if (!header.kid) {
-    throw new Error("OIDC JWT header missing kid");
+  const header = JSON.parse(decoder.decode(base64UrlDecode(headerSeg))) as {
+    alg?: string;
+    kid?: string;
+  };
+  if (header.alg !== "RS256" || !header.kid) {
+    throw new Error(`unsupported OIDC JWT header (alg=${header.alg ?? ""})`);
   }
 
   const jwksUrl = `${issuer}/.well-known/jwks`;
@@ -227,7 +189,9 @@ export async function verifyOidcToken(
       `OIDC JWKS request to ${jwksUrl} failed with status ${jwksRes.status}`,
     );
   }
-  const jwks = await jwksRes.json<JwkSet>();
+  const jwks = await jwksRes.json<{
+    keys: (JsonWebKey & { kid?: string })[];
+  }>();
   const jwk = jwks.keys.find((key) => key.kid === header.kid);
   if (!jwk) {
     throw new Error(`no OIDC JWK found for kid '${header.kid}'`);
@@ -240,22 +204,26 @@ export async function verifyOidcToken(
     false,
     ["verify"],
   );
-  const signingInput = new TextEncoder().encode(`${headerSeg}.${payloadSeg}`);
-  const signature = base64UrlDecode(sigSeg);
   const valid = await crypto.subtle.verify(
     "RSASSA-PKCS1-v1_5",
     verifyKey,
-    signature,
-    signingInput,
+    base64UrlDecode(sigSeg),
+    encoder.encode(`${headerSeg}.${payloadSeg}`),
   );
   if (!valid) {
     throw new Error("OIDC JWT signature validation failed");
   }
 
-  const claims = JSON.parse(
-    new TextDecoder().decode(base64UrlDecode(payloadSeg)),
-  ) as OidcClaims;
-  const now = unixNow();
+  const claims = JSON.parse(decoder.decode(base64UrlDecode(payloadSeg))) as {
+    iss: string;
+    aud: string | string[];
+    exp: number;
+    repository_owner_id: string;
+    repository: string;
+    ref: string;
+    event_name: string;
+  };
+
   if (claims.iss !== issuer) {
     throw new Error(`unexpected OIDC issuer '${claims.iss}'`);
   }
@@ -265,30 +233,42 @@ export async function verifyOidcToken(
   if (!audMatches) {
     throw new Error("OIDC JWT audience mismatch");
   }
-  if (typeof claims.exp !== "number" || claims.exp <= now - 60) {
+  if (typeof claims.exp !== "number" || claims.exp <= unixNow() - 60) {
     throw new Error("OIDC JWT has expired");
   }
 
-  return claims;
-}
-
-const isLastVersionRejection = (status: number, body: string): boolean =>
-  status === 400 && body.toLowerCase().includes("last version");
-
-function isDownloadThresholdRejection(status: number, body: string): boolean {
-  if (status !== 400 && status !== 403 && status !== 422) {
-    return false;
+  const ownerId = Number.parseInt(claims.repository_owner_id, 10);
+  if (
+    !Number.isSafeInteger(ownerId) ||
+    String(ownerId) !== claims.repository_owner_id
+  ) {
+    throw new Error(
+      `invalid repository_owner_id '${claims.repository_owner_id}'`,
+    );
   }
-  const lower = body.toLowerCase();
+  const repoParts = claims.repository.split("/");
+  if (repoParts.length !== 2 || !repoParts[1]) {
+    throw new Error(`invalid OIDC repository claim '${claims.repository}'`);
+  }
+  const prMatch = /^refs\/pull\/(\d+)\/merge$/.exec(claims.ref);
 
-  return (
-    lower.includes("5000") ||
-    lower.includes("5,000") ||
-    lower.includes("public package")
-  );
+  return {
+    ownerId,
+    repoName: repoParts[1],
+    ref: claims.ref,
+    eventName: claims.event_name,
+    prNumber: prMatch?.[1] ? Number.parseInt(prMatch[1], 10) : null,
+  };
 }
 
-const githubApiRequest = async (
+const isDownloadThresholdRejection = (status: number, body: string): boolean =>
+  (status === 400 || status === 403 || status === 422) &&
+  /5,?000|public package/i.test(body);
+
+const readBody = (response: Response): Promise<string> =>
+  response.text().catch(() => "");
+
+const githubApiRequest = (
   method: string,
   url: string,
   bearer: string,
@@ -307,6 +287,7 @@ export class GitHubAppClient {
   readonly #appId: number;
   readonly #privateKeyPem: string;
   readonly #apiUrl: string;
+  #signingKey: Promise<CryptoKey> | null = null;
 
   constructor(appId: number, privateKeyPem: string, apiUrl: string) {
     this.#appId = appId;
@@ -314,53 +295,121 @@ export class GitHubAppClient {
     this.#apiUrl = apiUrl.replace(/\/+$/, "");
   }
 
-  async #issueAppJwt(): Promise<string> {
-    const now = unixNow();
-    const header = base64UrlEncode(
-      new TextEncoder().encode(JSON.stringify({ alg: "RS256", typ: "JWT" })),
-    );
-    const payload = base64UrlEncode(
-      new TextEncoder().encode(
-        JSON.stringify({
-          iat: now - 60,
-          exp: now + 9 * 60,
-          iss: String(this.#appId),
-        }),
-      ),
-    );
-    const signingInput = `${header}.${payload}`;
-    const key = await crypto.subtle.importKey(
+  async #getSigningKey(): Promise<CryptoKey> {
+    this.#signingKey ??= crypto.subtle.importKey(
       "pkcs8",
       pemToPkcs8Der(this.#privateKeyPem),
       { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
       false,
       ["sign"],
     );
-    const sig = new Uint8Array(
-      await crypto.subtle.sign(
-        "RSASSA-PKCS1-v1_5",
-        key,
-        new TextEncoder().encode(signingInput),
-      ),
-    );
 
-    return `${signingInput}.${base64UrlEncode(sig)}`;
+    return this.#signingKey;
   }
 
   public async installationToken(installationId: number): Promise<string> {
-    const jwt = await this.#issueAppJwt();
-    const url = `${this.#apiUrl}/app/installations/${installationId}/access_tokens`;
-    const response = await githubApiRequest("POST", url, jwt);
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
+    const now = unixNow();
+    const header = base64UrlEncode(
+      encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })),
+    );
+    const payload = base64UrlEncode(
+      encoder.encode(
+        JSON.stringify({
+          iat: now - 60,
+          exp: now + 540,
+          iss: String(this.#appId),
+        }),
+      ),
+    );
+    const signingInput = `${header}.${payload}`;
+    const sig = new Uint8Array(
+      await crypto.subtle.sign(
+        "RSASSA-PKCS1-v1_5",
+        await this.#getSigningKey(),
+        encoder.encode(signingInput),
+      ),
+    );
 
+    const url = `${this.#apiUrl}/app/installations/${installationId}/access_tokens`;
+    const response = await githubApiRequest(
+      "POST",
+      url,
+      `${signingInput}.${base64UrlEncode(sig)}`,
+    );
+    if (!response.ok) {
       throw new Error(
-        `GitHub installation token request for installation ${installationId} failed (${response.status}): ${body}`,
+        `GitHub installation token request for installation ${installationId} failed (${response.status}): ${await readBody(response)}`,
       );
     }
-    const data = await response.json<{ token: string }>();
 
-    return data.token;
+    return (await response.json<{ token: string }>()).token;
+  }
+}
+
+export const createGitHubAppClient = (
+  config: LoadedConfig,
+): GitHubAppClient | null =>
+  config.githubApp
+    ? new GitHubAppClient(
+        config.githubApp.appId,
+        config.githubApp.privateKeyPem,
+        config.githubApiUrl,
+      )
+    : null;
+
+export async function exchangeInstallationGhcrToken(
+  config: LoadedConfig,
+  owner: LoadedOwner,
+  oci: OciClient,
+  repository: string,
+  scopeAction: "pull" | "pull,push",
+): Promise<string> {
+  const app = createGitHubAppClient(config);
+  if (!app) {
+    throw new GhcrAuthUnavailableError(
+      "GitHub App is not configured for GHCR token exchange",
+    );
+  }
+  if (owner.githubInstallationId === null) {
+    throw new GhcrAuthUnavailableError(
+      `owner '${owner.name}' has no github_installation_id configured`,
+    );
+  }
+
+  const installToken = await app.installationToken(owner.githubInstallationId);
+
+  return oci.exchangeToken(repository, scopeAction, [
+    "x-access-token",
+    installToken,
+  ]);
+}
+
+export async function acquirePullToken(
+  config: LoadedConfig,
+  owner: LoadedOwner | undefined,
+  oci: OciClient,
+  repository: string,
+): Promise<string> {
+  try {
+    return await oci.exchangeToken(repository, "pull");
+  } catch (error) {
+    if (
+      !(error instanceof OciHttpError) ||
+      (error.status !== 401 && error.status !== 403) ||
+      !owner ||
+      !config.githubApp ||
+      owner.githubInstallationId === null
+    ) {
+      throw error;
+    }
+
+    return exchangeInstallationGhcrToken(
+      config,
+      owner,
+      oci,
+      repository,
+      "pull",
+    );
   }
 }
 
@@ -372,9 +421,7 @@ export class GitHubPackagesClient {
   }
 
   #packageUrl(owner: string, ownerType: OwnerType, pkg: string): string {
-    const scopeSegment = ownerType === "org" ? "orgs" : "users";
-
-    return `${this.#apiUrl}/${scopeSegment}/${owner}/packages/container/${pkg}`;
+    return `${this.#apiUrl}/${ownerType === "org" ? "orgs" : "users"}/${owner}/packages/container/${pkg}`;
   }
 
   public async listGhcrPackageVersionsPage(
@@ -390,10 +437,8 @@ export class GitHubPackagesClient {
       return { versions: [], notFound: true };
     }
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-
       throw new Error(
-        `failed to list GHCR versions at ${url} (${response.status}): ${body}`,
+        `failed to list GHCR versions at ${url} (${response.status}): ${await readBody(response)}`,
       );
     }
 
@@ -453,7 +498,6 @@ export class GitHubPackagesClient {
       if (result.notFound) {
         return { versions, requestsUsed, complete: true };
       }
-
       for (const item of result.versions) {
         versions.set(item.name, item.id);
         remaining?.delete(item.name);
@@ -484,34 +528,35 @@ export class GitHubPackagesClient {
     if (response.ok) {
       return true;
     }
-    const body = await response.text().catch(() => "");
 
     throw new Error(
-      `failed to check GHCR version ${versionId} for ${owner}/${pkg} (${response.status}): ${body}`,
+      `failed to check GHCR version ${versionId} for ${owner}/${pkg} (${response.status}): ${await readBody(response)}`,
     );
   }
 
-  async #deletePackage(
-    packageUrl: string,
-    token: string,
-  ): Promise<DeleteOutcome> {
-    const response = await githubApiRequest("DELETE", packageUrl, token);
-    if (response.status === 404) {
-      const body = await response.text().catch(() => "");
-
-      return { kind: "not_found", reason: body };
-    }
+  async #classifyDelete(
+    response: Response,
+    targetLabel: string,
+  ): Promise<{ outcome?: DeleteOutcome; body: string }> {
     if (response.ok) {
-      return { kind: "deleted" };
+      return { outcome: { kind: "deleted" }, body: "" };
     }
-
-    const body = await response.text().catch(() => "");
+    const body = await readBody(response);
+    if (response.status === 404) {
+      return { outcome: { kind: "not_found", reason: body }, body };
+    }
     if (isDownloadThresholdRejection(response.status, body)) {
-      return { kind: "blocked", reason: body };
+      return { outcome: { kind: "blocked", reason: body }, body };
+    }
+    if (
+      response.status === 400 &&
+      body.toLowerCase().includes("last version")
+    ) {
+      return { body };
     }
 
     throw new Error(
-      `failed to delete GHCR package ${packageUrl} (${response.status}): ${body}`,
+      `failed to delete ${targetLabel} (${response.status}): ${body}`,
     );
   }
 
@@ -524,51 +569,38 @@ export class GitHubPackagesClient {
     manifestDigest: string,
   ): Promise<{ outcome: DeleteOutcome; requestsUsed: number }> {
     const packageUrl = this.#packageUrl(owner, ownerType, pkg);
-    const deleteUrl = `${packageUrl}/versions/${versionId}`;
-    const response = await githubApiRequest("DELETE", deleteUrl, token);
-    if (response.status === 404) {
-      const body = await response.text().catch(() => "");
-
-      return { outcome: { kind: "not_found", reason: body }, requestsUsed: 1 };
-    }
-    if (response.ok) {
-      return { outcome: { kind: "deleted" }, requestsUsed: 1 };
-    }
-
-    const body = await response.text().catch(() => "");
-    if (isLastVersionRejection(response.status, body)) {
-      console.log(
-        JSON.stringify({
-          message:
-            "last GHCR version cannot be deleted individually; deleting empty package",
-          owner,
-          package: pkg,
-          manifest: manifestDigest,
-        }),
-      );
-
-      return {
-        outcome: await this.#deletePackage(packageUrl, token),
-        requestsUsed: 2,
-      };
-    }
-    if (isDownloadThresholdRejection(response.status, body)) {
-      return { outcome: { kind: "blocked", reason: body }, requestsUsed: 1 };
-    }
-
-    throw new Error(
-      `failed to delete GHCR version ${versionId} (${manifestDigest}) for ${owner}/${pkg} (${response.status}): ${body}`,
+    const first = await this.#classifyDelete(
+      await githubApiRequest(
+        "DELETE",
+        `${packageUrl}/versions/${versionId}`,
+        token,
+      ),
+      `GHCR version ${versionId} (${manifestDigest}) for ${owner}/${pkg}`,
     );
+    if (first.outcome) {
+      return { outcome: first.outcome, requestsUsed: 1 };
+    }
+
+    console.log(
+      JSON.stringify({
+        message:
+          "last GHCR version cannot be deleted individually; deleting empty package",
+        owner,
+        package: pkg,
+        manifest: manifestDigest,
+      }),
+    );
+
+    const pkgDelete = await this.#classifyDelete(
+      await githubApiRequest("DELETE", packageUrl, token),
+      `GHCR package ${packageUrl}`,
+    );
+    if (!pkgDelete.outcome) {
+      throw new Error(
+        `failed to delete GHCR package ${packageUrl}: ${pkgDelete.body}`,
+      );
+    }
+
+    return { outcome: pkgDelete.outcome, requestsUsed: 2 };
   }
 }
-
-export const createGitHubAppClient = (
-  config: LoadedConfig,
-): GitHubAppClient | null =>
-  config.githubApp
-    ? new GitHubAppClient(
-        config.githubApp.appId,
-        config.githubApp.privateKeyPem,
-        config.githubApiUrl,
-      )
-    : null;

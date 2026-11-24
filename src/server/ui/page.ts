@@ -2,9 +2,12 @@ import { html } from "hono/html";
 
 import manifest from "../../../package.json" with { type: "json" };
 import {
+  MAIN_SCOPE,
   formatAge,
   formatBytes,
   formatRemainingTtl,
+  parsePrScope,
+  prScope,
   splitStorePath,
 } from "../../shared/format.ts";
 import { CACHE_PRIORITY } from "../../shared/nix-format.ts";
@@ -19,10 +22,7 @@ export interface DashboardData {
   mainPublicKey: string;
   prPublicKey: string;
   adminEnabled: boolean;
-  gc: {
-    prTtlDays: number;
-    mainLruDays: number;
-  };
+  gc: { prTtlDays: number; mainLruDays: number };
   mainPaths: number;
   prPaths: number;
   activePrs: number;
@@ -32,57 +32,60 @@ export interface DashboardData {
   now: number;
 }
 
-function parsePrScope(
-  scope: string,
-): { owner: string; repo: string; number: string } | null {
-  const match = /^pr:([^:]+):([^:]+):(\d+)$/.exec(scope);
-
-  return match ? { owner: match[1], repo: match[2], number: match[3] } : null;
-}
+const ghLink = (path: string, content: unknown, cls = "") =>
+  html`<a${
+    cls
+      ? html`
+          class="${cls}"
+        `
+      : ""
+  } href="${`https://github.com/${path}`}" target="_blank" rel="noopener noreferrer">${content}</a>`;
 
 function narinfoHref(scope: string, storeHash: string): string {
   const pr = parsePrScope(scope);
-  if (pr) {
-    return `/pr/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/${storeHash}.narinfo`;
-  }
 
-  return `/${storeHash}.narinfo`;
+  return pr
+    ? `/pr/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/${storeHash}.narinfo`
+    : `/${storeHash}.narinfo`;
 }
 
 export function renderDashboardPage(data: DashboardData) {
-  const totalBlobs = data.owners.reduce((sum, o) => sum + o.total_blobs, 0);
-  const totalBytes = data.owners.reduce((sum, o) => sum + o.total_bytes, 0);
-  const totalUnref = data.owners.reduce(
-    (sum, o) => sum + o.unreferenced_blobs,
-    0,
-  );
-  const totalBlocked = data.owners.reduce(
-    (sum, o) => sum + o.blocked_blobs.length,
-    0,
-  );
-  const maxOwnerBytes = Math.max(...data.owners.map((o) => o.total_bytes), 1);
+  let totalBlobs = 0;
+  let totalBytes = 0;
+  let totalUnref = 0;
+  let totalBlocked = 0;
+  let maxOwnerBytes = 1;
+  for (const o of data.owners) {
+    totalBlobs += o.total_blobs;
+    totalBytes += o.total_bytes;
+    totalUnref += o.unreferenced_blobs;
+    totalBlocked += o.blocked_blobs.length;
+    if (o.total_bytes > maxOwnerBytes) {
+      maxOwnerBytes = o.total_bytes;
+    }
+  }
 
   const host = new URL(data.publicBaseUrl).host;
-
-  const nixConfSnippet = [
-    `extra-substituters = ${data.publicBaseUrl}`,
-    `extra-trusted-public-keys = ${data.mainPublicKey}`,
-  ].join("\n");
-
-  const actionsSnippet = [
-    "- uses: so1ve/firn@v1",
-    "  with:",
-    `    server: ${data.publicBaseUrl}`,
-  ].join("\n");
-
-  const prSnippet = [
-    `extra-substituters = ${data.publicBaseUrl}/pr/<owner>/<repo>/<number>`,
-    `extra-trusted-public-keys = ${data.mainPublicKey} ${data.prPublicKey}`,
-  ].join("\n");
-
+  const snippets = [
+    {
+      id: "nix",
+      label: "nix.conf",
+      code: `extra-substituters = ${data.publicBaseUrl}\nextra-trusted-public-keys = ${data.mainPublicKey}`,
+    },
+    {
+      id: "gha",
+      label: "GitHub Actions",
+      code: `- uses: so1ve/firn@v1\n  with:\n    server: ${data.publicBaseUrl}`,
+    },
+    {
+      id: "pr",
+      label: "PR Overlay",
+      code: `extra-substituters = ${data.publicBaseUrl}/pr/<owner>/<repo>/<number>\nextra-trusted-public-keys = ${data.mainPublicKey} ${data.prPublicKey}`,
+    },
+  ];
   const scopeOptions = [
-    "main",
-    ...data.prs.map((pr) => `pr:${pr.owner_id}:${pr.repo}:${pr.pr_number}`),
+    MAIN_SCOPE,
+    ...data.prs.map((pr) => prScope(pr.owner_id, pr.repo, pr.pr_number)),
   ];
 
   const pathsRows =
@@ -98,7 +101,7 @@ export function renderDashboardPage(data: DashboardData) {
         `
       : data.paths.map((item) => {
           const parts = splitStorePath(item.store_path);
-          const prScope = parsePrScope(item.scope);
+          const pr = parsePrScope(item.scope);
           const href = narinfoHref(item.scope, parts.hash);
 
           return html`
@@ -145,17 +148,12 @@ export function renderDashboardPage(data: DashboardData) {
                     aria-hidden="true"
                   ></span>
                   ${
-                    prScope
-                      ? html`
-                          <a
-                            class="scope-text"
-                            href="${`https://github.com/${encodeURIComponent(prScope.owner)}/${encodeURIComponent(prScope.repo)}/pull/${prScope.number}`}"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            ${item.scope}
-                          </a>
-                        `
+                    pr
+                      ? ghLink(
+                          `${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/pull/${pr.number}`,
+                          item.scope,
+                          "scope-text",
+                        )
                       : html`
                           <span class="scope-text">${item.scope}</span>
                         `
@@ -163,13 +161,7 @@ export function renderDashboardPage(data: DashboardData) {
                 </span>
               </td>
               <td class="mono muted">
-                <a
-                  href="${`https://github.com/${encodeURIComponent(item.owner_id)}`}"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  ${item.owner_id}
-                </a>
+                ${ghLink(encodeURIComponent(item.owner_id), item.owner_id)}
               </td>
               <td class="num mono">${formatBytes(item.file_size)}</td>
               <td
@@ -220,28 +212,19 @@ export function renderDashboardPage(data: DashboardData) {
                       : ttl.state === "warn"
                         ? "warn-text"
                         : "muted";
-                  const repoUrl = `https://github.com/${encodeURIComponent(pr.owner_id)}/${encodeURIComponent(pr.repo)}`;
-                  const prUrl = `${repoUrl}/pull/${pr.pr_number}`;
+                  const repoPath = `${encodeURIComponent(pr.owner_id)}/${encodeURIComponent(pr.repo)}`;
 
                   return html`
                     <tr>
                       <td class="mono">
-                        <a
-                          href="${repoUrl}"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          <span class="muted">${pr.owner_id}/</span>
-                          <strong>${pr.repo}</strong>
-                        </a>
-                        <a
-                          class="muted"
-                          href="${prUrl}"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          #${pr.pr_number}
-                        </a>
+                        ${ghLink(
+                          repoPath,
+                          html`
+                            <span class="muted">${pr.owner_id}/</span>
+                            <strong>${pr.repo}</strong>
+                          `,
+                        )}
+                        ${ghLink(`${repoPath}/pull/${pr.pr_number}`, `#${pr.pr_number}`, "muted")}
                       </td>
                       <td class="num mono">${pr.path_count}</td>
                       <td
@@ -267,7 +250,7 @@ export function renderDashboardPage(data: DashboardData) {
                                     type="button"
                                     class="link-btn danger admin-only"
                                     hidden
-                                    data-delete-pr="${`${encodeURIComponent(pr.owner_id)}/${encodeURIComponent(pr.repo)}/${pr.pr_number}`}"
+                                    data-delete-pr="${`${repoPath}/${pr.pr_number}`}"
                                   >
                                     remove
                                   </button>
@@ -316,23 +299,19 @@ export function renderDashboardPage(data: DashboardData) {
                     owner.total_bytes > 0
                       ? Math.max(0.02, owner.total_bytes / maxOwnerBytes)
                       : 0;
-                  const pkgBase =
-                    owner.owner_type === "org"
-                      ? `https://github.com/orgs/${encodeURIComponent(owner.name)}/packages/container/package`
-                      : `https://github.com/users/${encodeURIComponent(owner.name)}/packages/container/package`;
+                  const pkgPrefix = `${owner.owner_type === "org" ? "orgs" : "users"}/${encodeURIComponent(owner.name)}/packages/container/package`;
                   const hasBlocked = owner.blocked_blobs.length > 0;
 
                   return html`
                     <tr class="${hasBlocked ? "owner-has-blocked" : ""}">
                       <td class="mono">
                         <span class="owner-name">
-                          <a
-                            href="${`https://github.com/${encodeURIComponent(owner.name)}`}"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            <strong>${owner.name}</strong>
-                          </a>
+                          ${ghLink(
+                            encodeURIComponent(owner.name),
+                            html`
+                              <strong>${owner.name}</strong>
+                            `,
+                          )}
                           <span class="faint">${owner.owner_type}</span>
                         </span>
                       </td>
@@ -348,16 +327,12 @@ export function renderDashboardPage(data: DashboardData) {
                       </td>
                       <td class="num mono muted">${owner.total_blobs}</td>
                       <td
-                        class="num mono ${
-                          owner.unreferenced_blobs > 0 ? "muted" : "faint"
-                        }"
+                        class="num mono ${owner.unreferenced_blobs > 0 ? "muted" : "faint"}"
                       >
                         ${owner.unreferenced_blobs}
                       </td>
                       <td
-                        class="num mono ${
-                          owner.active_prs > 0 ? "muted" : "faint"
-                        }"
+                        class="num mono ${owner.active_prs > 0 ? "muted" : "faint"}"
                       >
                         ${owner.active_prs}
                       </td>
@@ -372,13 +347,7 @@ export function renderDashboardPage(data: DashboardData) {
                                     (b) => html`
                                       <li>
                                         gc-blocked:
-                                        <a
-                                          href="${`${pkgBase}/${encodeURIComponent(b.ghcr_package)}`}"
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                        >
-                                          ${b.ghcr_package}
-                                        </a>
+                                        ${ghLink(`${pkgPrefix}/${encodeURIComponent(b.ghcr_package)}`, b.ghcr_package)}
                                         ${b.manifest_digest.slice(0, 19)}…
                                       </li>
                                     `,
@@ -421,7 +390,6 @@ export function renderDashboardPage(data: DashboardData) {
                 <h1>Firn</h1>
                 <span class="brand-url">${host}</span>
               </div>
-
               ${
                 data.adminEnabled
                   ? html`
@@ -532,67 +500,40 @@ export function renderDashboardPage(data: DashboardData) {
                   role="tablist"
                   aria-label="Configuration format"
                 >
-                  <button
-                    type="button"
-                    class="tab-btn"
-                    role="tab"
-                    aria-selected="true"
-                    data-tab="nix"
-                  >
-                    nix.conf
-                  </button>
-                  <button
-                    type="button"
-                    class="tab-btn"
-                    role="tab"
-                    aria-selected="false"
-                    data-tab="gha"
-                  >
-                    GitHub Actions
-                  </button>
-                  <button
-                    type="button"
-                    class="tab-btn"
-                    role="tab"
-                    aria-selected="false"
-                    data-tab="pr"
-                  >
-                    PR Overlay
-                  </button>
+                  ${snippets.map(
+                    (s, i) => html`
+                      <button
+                        type="button"
+                        class="tab-btn"
+                        role="tab"
+                        aria-selected="${i === 0 ? "true" : "false"}"
+                        data-tab="${s.id}"
+                      >
+                        ${s.label}
+                      </button>
+                    `,
+                  )}
                 </div>
                 <button
                   type="button"
                   id="snippet-copy-btn"
                   class="link-btn accent"
-                  data-copy="${nixConfSnippet}"
+                  data-copy="${snippets[0].code}"
                 >
                   Copy
                 </button>
               </div>
-
-              <div
-                class="code-block"
-                data-panel="nix"
-                data-snippet="${nixConfSnippet}"
-              >
-                <pre>${nixConfSnippet}</pre>
-              </div>
-              <div
-                class="code-block"
-                data-panel="gha"
-                data-snippet="${actionsSnippet}"
-                hidden
-              >
-                <pre>${actionsSnippet}</pre>
-              </div>
-              <div
-                class="code-block"
-                data-panel="pr"
-                data-snippet="${prSnippet}"
-                hidden
-              >
-                <pre>${prSnippet}</pre>
-              </div>
+              ${snippets.map(
+                (s, i) => html`
+                  <div
+                    class="code-block"
+                    data-panel="${s.id}"
+                    ${i === 0 ? "" : "hidden"}
+                  >
+                    <pre>${s.code}</pre>
+                  </div>
+                `,
+              )}
             </section>
 
             <section aria-labelledby="paths-heading">
@@ -709,7 +650,6 @@ export function renderDashboardPage(data: DashboardData) {
                   <span class="sec-count">${data.prs.length}</span>
                 </div>
               </div>
-
               ${prsSectionBody}
             </section>
 
@@ -720,32 +660,19 @@ export function renderDashboardPage(data: DashboardData) {
                   <span class="sec-count">${data.owners.length}</span>
                 </div>
               </div>
-
               ${ownersSectionBody}
             </section>
           </main>
 
           <footer class="foot">
             <div class="foot-brand">
-              <a
-                href="https://github.com/so1ve/firn"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Firn
-              </a>
+              ${ghLink("so1ve/firn", "Firn")}
               <span class="mono faint">v${manifest.version}</span>
             </div>
             <nav class="foot-links" aria-label="Cache endpoints and links">
               <a class="mono" href="/nix-cache-info">nix-cache-info</a>
               <a class="mono" href="/api/v1/public-keys">public-keys</a>
-              <a
-                href="https://github.com/so1ve/firn"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                GitHub
-              </a>
+              ${ghLink("so1ve/firn", "GitHub")}
             </nav>
           </footer>
         </div>

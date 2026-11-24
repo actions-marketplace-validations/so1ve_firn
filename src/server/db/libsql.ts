@@ -1,8 +1,12 @@
 import type { Row, StmtResult } from "@libsql/hrana-client";
 import { BatchCond, openHttp } from "@libsql/hrana-client";
 
-import type { CloseableSqlDatabase } from "./sqlite.ts";
-import type { SqlParam, SqlRunResult, SqlStatement } from "./types.ts";
+import type {
+  CloseableSqlDatabase,
+  SqlParam,
+  SqlRunResult,
+  SqlStatement,
+} from "../db.ts";
 
 export const normalizeLibsqlHttpUrl = (rawUrl: string): string =>
   rawUrl
@@ -48,40 +52,28 @@ export function openLibsql(
   }
 
   return {
-    async first<T>(
-      sql: string,
-      params: readonly SqlParam[] = [],
-    ): Promise<T | null> {
-      return withStream(async (stream) => {
+    first: <T>(sql: string, params: readonly SqlParam[] = []) =>
+      withStream(async (stream) => {
         const result = await stream.queryRow([sql, [...params]]);
-        if (!result.row) {
-          return null;
-        }
 
-        return rowToObject<T>(result.columnNames, result.row);
-      });
-    },
+        return result.row
+          ? rowToObject<T>(result.columnNames, result.row)
+          : null;
+      }),
 
-    async all<T>(sql: string, params: readonly SqlParam[] = []): Promise<T[]> {
-      return withStream(async (stream) => {
+    all: <T>(sql: string, params: readonly SqlParam[] = []) =>
+      withStream(async (stream) => {
         const result = await stream.query([sql, [...params]]);
 
         return result.rows.map((row) =>
           rowToObject<T>(result.columnNames, row),
         );
-      });
-    },
+      }),
 
-    async run(
-      sql: string,
-      params: readonly SqlParam[] = [],
-    ): Promise<SqlRunResult> {
-      return withStream(async (stream) => {
-        const result = await stream.run([sql, [...params]]);
-
-        return { changes: result.affectedRowCount };
-      });
-    },
+    run: (sql: string, params: readonly SqlParam[] = []) =>
+      withStream(async (stream) => ({
+        changes: (await stream.run([sql, [...params]])).affectedRowCount,
+      })),
 
     async batch(
       statements: readonly SqlStatement[],
@@ -107,11 +99,10 @@ export function openLibsql(
 
         const commitStep = batch.step().condition(BatchCond.ok(prevStep));
         const commitPromise = commitStep.run("COMMIT");
-
-        const rollbackStep = batch
+        const rollbackPromise = batch
           .step()
-          .condition(BatchCond.not(BatchCond.ok(commitStep)));
-        const rollbackPromise = rollbackStep.run("ROLLBACK");
+          .condition(BatchCond.not(BatchCond.ok(commitStep)))
+          .run("ROLLBACK");
 
         await batch.execute();
         await beginPromise;
@@ -125,8 +116,6 @@ export function openLibsql(
       });
     },
 
-    close(): void {
-      client.close();
-    },
+    close: () => client.close(),
   };
 }

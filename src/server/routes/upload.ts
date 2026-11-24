@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 
+import { errorMessage } from "../../shared/format.ts";
 import {
   fingerprint,
   normalizeReferences,
@@ -35,28 +36,13 @@ import {
 import {
   GhcrAuthUnavailableError,
   acquirePullToken,
-  exchangeInstallationGhcrToken,
-} from "../ghcr.ts";
-import {
   constantTimeTokenMatches,
-  oidcOwnerId,
-  oidcPullRequestNumber,
-  oidcRepoName,
+  exchangeInstallationGhcrToken,
+  extractBearerToken,
   verifyOidcToken,
 } from "../github.ts";
 
-type UploadScope =
-  | { kind: "main" }
-  | { kind: "pr"; owner: string; repo: string; number: number };
-
-interface AuthenticatedUpload {
-  owner: LoadedOwner;
-  ghcrPackage: string;
-  scope: UploadScope;
-  needsGhcrToken: boolean;
-}
-
-class HttpError extends Error {
+export class HttpError extends Error {
   public readonly status: 400 | 401 | 403 | 503;
   public readonly code: string | undefined;
 
@@ -67,29 +53,24 @@ class HttpError extends Error {
   }
 }
 
-const errorResponse = (c: Context<AppBindings>, error: HttpError): Response =>
-  c.text(
-    error.message,
-    error.status,
-    error.code ? { "X-Firn-Error": error.code } : undefined,
-  );
+interface AuthenticatedUpload {
+  owner: LoadedOwner;
+  ghcrPackage: string;
+  scope: string;
+  prInfo: { repo: string; number: number } | null;
+  needsGhcrToken: boolean;
+}
 
-const scopeToDbString = (scope: UploadScope): string =>
-  scope.kind === "main"
-    ? MAIN_SCOPE
-    : prScope(scope.owner, scope.repo, scope.number);
-
-function extractBearerToken(request: Request): string {
-  const header = request.headers.get("authorization") ?? "";
-  if (!header.startsWith("Bearer ")) {
-    throw new HttpError(401, "missing or invalid Bearer Authorization header");
+function tryHttp<T>(
+  status: 400 | 401 | 403 | 503,
+  fn: () => T,
+  prefix = "",
+): T {
+  try {
+    return fn();
+  } catch (error) {
+    throw new HttpError(status, `${prefix}${errorMessage(error)}`);
   }
-  const token = header.slice("Bearer ".length).trim();
-  if (!token) {
-    throw new HttpError(401, "missing or invalid Bearer Authorization header");
-  }
-
-  return token;
 }
 
 async function matchManualOwner(
@@ -99,11 +80,8 @@ async function matchManualOwner(
 ): Promise<LoadedOwner | null> {
   if (requestedOwner) {
     const owner = config.ownersByName.get(requestedOwner);
-    if (!owner) {
-      return null;
-    }
 
-    return (await constantTimeTokenMatches(owner.manualTokens, token))
+    return owner && (await constantTimeTokenMatches(owner.manualTokens, token))
       ? owner
       : null;
   }
@@ -129,97 +107,79 @@ async function authenticate(
   request: Request,
   requestedOwner: string | undefined,
 ): Promise<AuthenticatedUpload> {
-  const token = extractBearerToken(request);
+  const token = extractBearerToken(request.headers.get("authorization"));
+  if (!token) {
+    throw new HttpError(401, "missing or invalid Bearer Authorization header");
+  }
+
   const manualOwner = await matchManualOwner(config, requestedOwner, token);
   if (manualOwner) {
     return {
       owner: manualOwner,
       ghcrPackage: manualOwner.manualPushPackage,
-      scope: { kind: "main" },
+      scope: MAIN_SCOPE,
+      prInfo: null,
       needsGhcrToken: true,
     };
   }
 
-  let claims;
-  try {
-    claims = await verifyOidcToken(
-      config.oidcIssuer,
-      config.publicBaseUrl,
-      token,
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+  const oidc = await verifyOidcToken(
+    config.oidcIssuer,
+    config.publicBaseUrl,
+    token,
+  ).catch((error: unknown) => {
+    const message = errorMessage(error);
     console.warn(
       JSON.stringify({ message: "OIDC authentication failed", error: message }),
     );
 
     throw new HttpError(401, `invalid credentials: ${message}`);
-  }
+  });
 
-  let ownerId: number;
-  try {
-    ownerId = oidcOwnerId(claims);
-  } catch (error) {
-    throw new HttpError(
-      401,
-      error instanceof Error ? error.message : String(error),
-    );
-  }
-
-  const owner = config.ownersByGithubId.get(ownerId);
+  const owner = config.ownersByGithubId.get(oidc.ownerId);
   if (!owner) {
     throw new HttpError(403, "GitHub owner is not configured");
   }
   if (requestedOwner && requestedOwner !== owner.name) {
     throw new HttpError(403, "requested owner does not match OIDC identity");
   }
-
-  let repoName: string;
-  try {
-    repoName = oidcRepoName(claims);
-  } catch (error) {
+  if (!isRepoAllowed(owner, oidc.repoName)) {
     throw new HttpError(
       403,
-      error instanceof Error ? error.message : String(error),
+      `repository '${oidc.repoName}' is not allowed for owner '${owner.name}'`,
     );
   }
-  if (!isRepoAllowed(owner, repoName)) {
-    throw new HttpError(
-      403,
-      `repository '${repoName}' is not allowed for owner '${owner.name}'`,
-    );
-  }
-
-  let scope: UploadScope;
-  if (claims.event_name === "pull_request_target") {
+  if (oidc.eventName === "pull_request_target") {
     throw new HttpError(
       403,
       "pull_request_target is rejected to prevent fork PR cache poisoning",
     );
-  } else if (claims.event_name === "pull_request") {
-    const number = oidcPullRequestNumber(claims);
-    if (number === null) {
+  }
+
+  let scope = MAIN_SCOPE;
+  let prInfo: { repo: string; number: number } | null = null;
+  if (oidc.eventName === "pull_request") {
+    if (oidc.prNumber === null) {
       throw new HttpError(
         403,
         "pull_request event did not carry a refs/pull/<n>/merge ref",
       );
     }
-    scope = { kind: "pr", owner: owner.name, repo: repoName, number };
-  } else {
-    if (!isMainRef(owner, claims.ref)) {
-      throw new HttpError(
-        403,
-        `ref '${claims.ref}' is not in main_refs for owner '${owner.name}'`,
-        "non-main-ref",
-      );
-    }
-    scope = { kind: "main" };
+    scope = prScope(owner.name, oidc.repoName, oidc.prNumber);
+    prInfo = { repo: oidc.repoName, number: oidc.prNumber };
+  } else if (!isMainRef(owner, oidc.ref)) {
+    throw new HttpError(
+      403,
+      `ref '${oidc.ref}' is not in main_refs for owner '${owner.name}'`,
+      "non-main-ref",
+    );
   }
 
   return {
     owner,
-    ghcrPackage: ghcrPackageForRepo(owner, repoName),
+    ghcrPackage: ghcrPackageForRepo(owner, oidc.repoName),
     scope,
+    prInfo,
     needsGhcrToken: false,
   };
 }
@@ -233,71 +193,54 @@ async function validateAndSign(
   entry: CommitEntry,
   now: number,
 ): Promise<CommitRecord> {
-  let storeHash: string;
-  let blobDigest: string;
-  let manifestDigest: string;
-  let references: string[];
-  let deriver: string | null;
+  const { storeHash, blobDigest, manifestDigest, references, deriver } =
+    tryHttp(400, () => {
+      if (!entry.manifest_digest.startsWith("sha256:")) {
+        throw new Error("manifest_digest must start with 'sha256:'");
+      }
+      const manifestHex = entry.manifest_digest.slice(7);
+      validateSha256Hex(entry.blob_digest);
+      validateSha256Hex(manifestHex);
+      validateSha256NixBase32(entry.nar_hash);
+      validateSha256NixBase32(entry.file_hash);
 
-  try {
-    storeHash = storeHashFromPath(entry.store_path);
-    validateSha256Hex(entry.blob_digest);
-    blobDigest = entry.blob_digest.toLowerCase();
+      return {
+        storeHash: storeHashFromPath(entry.store_path),
+        blobDigest: entry.blob_digest.toLowerCase(),
+        manifestDigest: `sha256:${manifestHex.toLowerCase()}`,
+        references: normalizeReferences(entry.references ?? []),
+        deriver: entry.deriver
+          ? entry.deriver.startsWith("/nix/store/")
+            ? storePathBasename(entry.deriver)
+            : entry.deriver
+          : null,
+      };
+    });
 
-    if (!entry.manifest_digest.startsWith("sha256:")) {
-      throw new Error("manifest_digest must start with 'sha256:'");
-    }
-    const manifestHex = entry.manifest_digest.slice("sha256:".length);
-    validateSha256Hex(manifestHex);
-    manifestDigest = `sha256:${manifestHex.toLowerCase()}`;
-
-    validateSha256NixBase32(entry.nar_hash);
-    validateSha256NixBase32(entry.file_hash);
-    references = normalizeReferences(entry.references ?? []);
-
-    deriver = entry.deriver
-      ? entry.deriver.startsWith("/nix/store/")
-        ? storePathBasename(entry.deriver)
-        : entry.deriver
-      : null;
-  } catch (error) {
-    throw new HttpError(
-      400,
-      error instanceof Error ? error.message : String(error),
-    );
-  }
-
-  try {
-    await oci.verifyManifestAndBlob(
+  await oci
+    .verifyManifestAndBlob(
       repository,
       manifestDigest,
       blobDigest,
       entry.file_size,
       pullToken,
-    );
-  } catch (error) {
-    throw new HttpError(
-      400,
-      `GHCR verification failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+    )
+    .catch((error: unknown) => {
+      throw new HttpError(
+        400,
+        `GHCR verification failed: ${errorMessage(error)}`,
+      );
+    });
 
-  const signingKey = auth.scope.kind === "main" ? config.mainKey : config.prKey;
-  const fp = fingerprint(
-    entry.store_path,
-    entry.nar_hash,
-    entry.nar_size,
-    references,
+  const signingKey = auth.prInfo ? config.prKey : config.mainKey;
+  const signature = await signingKey.signFingerprint(
+    fingerprint(entry.store_path, entry.nar_hash, entry.nar_size, references),
   );
-  const signature = await signingKey.signFingerprint(fp);
 
   return {
     ownerId: auth.owner.name,
-    scope: scopeToDbString(auth.scope),
-    prInfo:
-      auth.scope.kind === "pr"
-        ? { repo: auth.scope.repo, number: auth.scope.number }
-        : null,
+    scope: auth.scope,
+    prInfo: auth.prInfo,
     ghcrPackage: auth.ghcrPackage,
     manifestDigest,
     blobDigest,
@@ -317,125 +260,92 @@ async function validateAndSign(
 export async function handleUploadPlan(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  try {
-    const config = c.get("config");
-    const body = await c.req.json<PlanRequest>();
-    const auth = await authenticate(config, c.req.raw, body.owner);
+  const config = c.get("config");
+  const body = await c.req.json<PlanRequest>();
+  const auth = await authenticate(config, c.req.raw, body.owner);
+  const hashes = tryHttp(400, () =>
+    (body.store_paths ?? []).map((p) => storeHashFromPath(p)),
+  );
 
-    const hashes: string[] = [];
-    for (const storePath of body.store_paths ?? []) {
-      try {
-        hashes.push(storeHashFromPath(storePath));
-      } catch (error) {
-        throw new HttpError(
-          400,
-          error instanceof Error ? error.message : String(error),
-        );
+  const existing = await existingStoreHashes(c.get("db"), auth.scope, hashes);
+  const missing = hashes.filter((hash) => !existing.has(hash));
+  const repo = ghcrRepository(auth.owner.name, auth.ghcrPackage);
+
+  const oci = new OciClient(config.registryUrl);
+  let ghcrToken: string | undefined;
+  if (auth.needsGhcrToken) {
+    ghcrToken = await exchangeInstallationGhcrToken(
+      config,
+      auth.owner,
+      oci,
+      repo,
+      "pull,push",
+    ).catch((error: unknown) => {
+      if (error instanceof GhcrAuthUnavailableError) {
+        throw new HttpError(503, error.message);
       }
-    }
 
-    const scope = scopeToDbString(auth.scope);
-    const existing = await existingStoreHashes(c.get("db"), scope, hashes);
-    const missing = hashes.filter((hash) => !existing.has(hash));
-    const repo = ghcrRepository(auth.owner.name, auth.ghcrPackage);
-
-    const oci = new OciClient(config.registryUrl);
-    let ghcrToken: string | undefined;
-    if (auth.needsGhcrToken) {
-      try {
-        ghcrToken = await exchangeInstallationGhcrToken(
-          config,
-          auth.owner,
-          oci,
-          repo,
-          "pull,push",
-        );
-      } catch (error) {
-        if (error instanceof GhcrAuthUnavailableError) {
-          throw new HttpError(503, error.message);
-        }
-
-        throw error;
-      }
-    }
-
-    console.log(
-      JSON.stringify({
-        message: "planned cache upload",
-        owner: auth.owner.name,
-        scope,
-        repository: repo,
-        total: hashes.length,
-        missing: missing.length,
-        manual: auth.needsGhcrToken,
-      }),
-    );
-
-    const response: PlanResponse = {
-      owner: auth.owner.name,
-      scope,
-      registry: config.registryUrl,
-      ghcr_repository: repo,
-      ...(ghcrToken ? { ghcr_token: ghcrToken } : {}),
-      missing,
-    };
-
-    return c.json(response);
-  } catch (error) {
-    if (error instanceof HttpError) {
-      return errorResponse(c, error);
-    }
-
-    throw error;
+      throw error;
+    });
   }
+
+  console.log(
+    JSON.stringify({
+      message: "planned cache upload",
+      owner: auth.owner.name,
+      scope: auth.scope,
+      repository: repo,
+      total: hashes.length,
+      missing: missing.length,
+      manual: auth.needsGhcrToken,
+    }),
+  );
+
+  return c.json({
+    owner: auth.owner.name,
+    scope: auth.scope,
+    registry: config.registryUrl,
+    ghcr_repository: repo,
+    ...(ghcrToken ? { ghcr_token: ghcrToken } : {}),
+    missing,
+  } satisfies PlanResponse);
 }
 
 export async function handleUploadCommit(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  try {
-    const config = c.get("config");
-    const body = await c.req.json<CommitRequest>();
-    const auth = await authenticate(config, c.req.raw, body.owner);
-    const repo = ghcrRepository(auth.owner.name, auth.ghcrPackage);
-    const oci = new OciClient(config.registryUrl);
-    const now = unixNow();
-    const entries = body.entries ?? [];
-    const pullToken =
-      entries.length > 0
-        ? await acquirePullToken(config, auth.owner, oci, repo)
-        : "";
+  const config = c.get("config");
+  const body = await c.req.json<CommitRequest>();
+  const auth = await authenticate(config, c.req.raw, body.owner);
+  const repo = ghcrRepository(auth.owner.name, auth.ghcrPackage);
+  const oci = new OciClient(config.registryUrl);
+  const now = unixNow();
+  const entries = body.entries ?? [];
+  const pullToken =
+    entries.length > 0
+      ? await acquirePullToken(config, auth.owner, oci, repo)
+      : "";
 
-    const records = await Promise.all(
-      entries.map((entry) =>
-        validateAndSign(oci, repo, pullToken, config, auth, entry, now),
-      ),
-    );
-    const committed = await commitEntries(c.get("db"), records);
-    const scope = scopeToDbString(auth.scope);
+  const records = await Promise.all(
+    entries.map((entry) =>
+      validateAndSign(oci, repo, pullToken, config, auth, entry, now),
+    ),
+  );
+  const committed = await commitEntries(c.get("db"), records);
 
-    console.log(
-      JSON.stringify({
-        message: "committed cache entries",
-        owner: auth.owner.name,
-        scope,
-        repository: repo,
-        committed,
-      }),
-    );
-
-    const response: CommitResponse = {
+  console.log(
+    JSON.stringify({
+      message: "committed cache entries",
       owner: auth.owner.name,
-      scope,
+      scope: auth.scope,
+      repository: repo,
       committed,
-    };
+    }),
+  );
 
-    return c.json(response);
-  } catch (error) {
-    if (error instanceof HttpError) {
-      return errorResponse(c, error);
-    }
-
-    throw error;
-  }
+  return c.json({
+    owner: auth.owner.name,
+    scope: auth.scope,
+    committed,
+  } satisfies CommitResponse);
 }

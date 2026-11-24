@@ -50,55 +50,6 @@ export interface LoadedConfig {
   ownersByGithubId: Map<number, LoadedOwner>;
 }
 
-const OWNER_NAME_RE = /^[\w-]+$/;
-
-function parsePositiveInt(raw: string): number {
-  const value = Number.parseInt(raw.trim(), 10);
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`expected positive integer, got '${raw}'`);
-  }
-
-  return value;
-}
-
-const parseOptionalPositiveInt = (
-  raw: string | undefined,
-  fallback: number,
-): number => (raw?.trim() ? parsePositiveInt(raw) : fallback);
-
-function parseManualTokens(raw: string | undefined): Map<string, string[]> {
-  const result = new Map<string, string[]>();
-  if (!raw?.trim()) {
-    return result;
-  }
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  for (const [owner, tokens] of Object.entries(parsed)) {
-    if (!Array.isArray(tokens)) {
-      throw new TypeError(`MANUAL_TOKENS_JSON['${owner}'] must be an array`);
-    }
-    result.set(
-      owner,
-      tokens
-        .map((item) => String(item).trim())
-        .filter((item) => item.length > 0),
-    );
-  }
-
-  return result;
-}
-
-export const ghcrPackageForRepo = (owner: LoadedOwner, repo: string): string =>
-  owner.packageTemplate.replaceAll("{repo}", repo).toLowerCase();
-
-export const ghcrRepository = (ownerName: string, pkg: string): string =>
-  `${ownerName.toLowerCase()}/${pkg.toLowerCase()}`;
-
-export const isRepoAllowed = (owner: LoadedOwner, repo: string): boolean =>
-  owner.allowedRepos.size === 0 || owner.allowedRepos.has(repo);
-
-export const isMainRef = (owner: LoadedOwner, refName: string): boolean =>
-  owner.mainRefs.includes(refName);
-
 export interface ServerRuntimeEnv {
   PUBLIC_BASE_URL?: string;
   OWNERS_JSON?: string;
@@ -122,11 +73,88 @@ export interface LoadConfigOptions {
   defaultMaxGcSubrequests?: number;
 }
 
-export async function loadConfig(
+const OWNER_NAME_RE = /^[\w-]+$/;
+
+function parsePositiveInt(raw: string): number {
+  const value = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`expected positive integer, got '${raw}'`);
+  }
+
+  return value;
+}
+
+const parseOptionalPositiveInt = (
+  raw: string | undefined,
+  fallback: number,
+): number => (raw?.trim() ? parsePositiveInt(raw) : fallback);
+
+const stripTrailingSlash = (url: string): string =>
+  url.trim().replace(/\/+$/, "");
+
+function parseManualTokens(raw: string | undefined): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+  if (!raw?.trim()) {
+    return result;
+  }
+  for (const [owner, tokens] of Object.entries(
+    JSON.parse(raw) as Record<string, unknown>,
+  )) {
+    if (!Array.isArray(tokens)) {
+      throw new TypeError(`MANUAL_TOKENS_JSON['${owner}'] must be an array`);
+    }
+    result.set(
+      owner,
+      tokens.map((item) => String(item).trim()).filter(Boolean),
+    );
+  }
+
+  return result;
+}
+
+export const ghcrPackageForRepo = (owner: LoadedOwner, repo: string): string =>
+  owner.packageTemplate.replaceAll("{repo}", repo).toLowerCase();
+
+export const ghcrRepository = (ownerName: string, pkg: string): string =>
+  `${ownerName.toLowerCase()}/${pkg.toLowerCase()}`;
+
+export const isRepoAllowed = (owner: LoadedOwner, repo: string): boolean =>
+  owner.allowedRepos.size === 0 || owner.allowedRepos.has(repo);
+
+export const isMainRef = (owner: LoadedOwner, refName: string): boolean =>
+  owner.mainRefs.includes(refName);
+
+let cachedConfig: { key: string; promise: Promise<LoadedConfig> } | null = null;
+
+const configCacheKey = (
   env: ServerRuntimeEnv,
-  options: LoadConfigOptions = {},
+  defaultMaxGcSubrequests: number,
+): string =>
+  JSON.stringify([
+    defaultMaxGcSubrequests,
+    env.PUBLIC_BASE_URL,
+    env.OWNERS_JSON,
+    env.GC_PR_TTL_DAYS,
+    env.GC_MAIN_LRU_DAYS,
+    env.GC_MAX_SUBREQUESTS,
+    env.GITHUB_APP_ID,
+    env.MAIN_SIGNING_KEY,
+    env.PR_SIGNING_KEY,
+    env.GITHUB_APP_PRIVATE_KEY,
+    env.GITHUB_PACKAGES_TOKEN,
+    env.GITHUB_WEBHOOK_SECRET,
+    env.MANUAL_TOKENS_JSON,
+    env.ADMIN_TOKEN,
+    env.GHCR_REGISTRY_URL,
+    env.GITHUB_API_URL,
+    env.GITHUB_OIDC_ISSUER,
+  ]);
+
+async function buildConfig(
+  env: ServerRuntimeEnv,
+  defaultMaxGcSubrequests: number,
 ): Promise<LoadedConfig> {
-  const publicBaseUrl = (env.PUBLIC_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  const publicBaseUrl = stripTrailingSlash(env.PUBLIC_BASE_URL ?? "");
   if (!publicBaseUrl) {
     throw new Error("PUBLIC_BASE_URL must not be empty");
   }
@@ -188,30 +216,22 @@ export async function loadConfig(
 
   const appIdRaw = env.GITHUB_APP_ID?.trim();
   const privateKeyPem = env.GITHUB_APP_PRIVATE_KEY?.trim();
-  const githubApp: LoadedGitHubApp | null =
-    appIdRaw && privateKeyPem
-      ? {
-          appId: parsePositiveInt(appIdRaw),
-          privateKeyPem,
-        }
-      : null;
 
   return {
     publicBaseUrl,
-    registryUrl: (env.GHCR_REGISTRY_URL || "https://ghcr.io").replace(
-      /\/+$/,
-      "",
+    registryUrl: stripTrailingSlash(env.GHCR_REGISTRY_URL || "https://ghcr.io"),
+    githubApiUrl: stripTrailingSlash(
+      env.GITHUB_API_URL || "https://api.github.com",
     ),
-    githubApiUrl: (env.GITHUB_API_URL || "https://api.github.com").replace(
-      /\/+$/,
-      "",
+    oidcIssuer: stripTrailingSlash(
+      env.GITHUB_OIDC_ISSUER || "https://token.actions.githubusercontent.com",
     ),
-    oidcIssuer: (
-      env.GITHUB_OIDC_ISSUER || "https://token.actions.githubusercontent.com"
-    ).replace(/\/+$/, ""),
     mainKey,
     prKey,
-    githubApp,
+    githubApp:
+      appIdRaw && privateKeyPem
+        ? { appId: parsePositiveInt(appIdRaw), privateKeyPem }
+        : null,
     githubPackagesToken: env.GITHUB_PACKAGES_TOKEN?.trim() || null,
     webhookSecret: env.GITHUB_WEBHOOK_SECRET?.trim() || null,
     gc: {
@@ -219,11 +239,32 @@ export async function loadConfig(
       mainLruDays: parseOptionalPositiveInt(env.GC_MAIN_LRU_DAYS, 15),
       maxSubrequests: parseOptionalPositiveInt(
         env.GC_MAX_SUBREQUESTS,
-        options.defaultMaxGcSubrequests ?? 40,
+        defaultMaxGcSubrequests,
       ),
     },
     adminToken: env.ADMIN_TOKEN?.trim() || null,
     ownersByName,
     ownersByGithubId,
   };
+}
+
+export function loadConfig(
+  env: ServerRuntimeEnv,
+  options: LoadConfigOptions = {},
+): Promise<LoadedConfig> {
+  const defaultMax = options.defaultMaxGcSubrequests ?? 40;
+  const key = configCacheKey(env, defaultMax);
+  if (cachedConfig?.key === key) {
+    return cachedConfig.promise;
+  }
+  const promise = buildConfig(env, defaultMax).catch((error: unknown) => {
+    if (cachedConfig?.key === key) {
+      cachedConfig = null;
+    }
+
+    throw error;
+  });
+  cachedConfig = { key, promise };
+
+  return promise;
 }

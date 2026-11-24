@@ -28,12 +28,8 @@ import {
 } from "./format.ts";
 
 const execFileAsync = promisify(execFile);
-// Keep each commit batch safely below Cloudflare Workers' 50-subrequest limit
-// (1 OCI token exchange + 2 GHCR verification requests per entry).
 const COMMIT_BATCH_SIZE = 15;
-// GitHub Actions OIDC JWTs and GHCR bearer tokens expire after 5 minutes;
-// refresh ahead of expiry so large multi-batch uploads never fail mid-flight.
-const TOKEN_REFRESH_MS = 3 * 60 * 1000;
+const TOKEN_REFRESH_MS = 180_000;
 
 export interface PushOptions {
   server: string;
@@ -71,11 +67,17 @@ type AuthMode =
   | { kind: "manual"; getBearer: () => Promise<string> }
   | { kind: "oidc"; getBearer: () => Promise<string>; githubToken: string };
 
-interface DumpedNar {
-  compressed: Uint8Array;
-  narSha256: Uint8Array;
-  narSize: number;
-  fileSha256: Uint8Array;
+export class PushHttpError extends Error {
+  public readonly status: number;
+  public readonly body: string;
+  public readonly code: string | null;
+
+  constructor(url: string, status: number, body: string, code: string | null) {
+    super(`request to ${url} failed (${status}): ${body}`);
+    this.status = status;
+    this.body = body;
+    this.code = code;
+  }
 }
 
 export function parseNixPathInfoJson(raw: string): NixPathInfo[] {
@@ -106,19 +108,8 @@ export function parseNixPathInfoJson(raw: string): NixPathInfo[] {
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
-async function queryNixClosure(paths: string[]): Promise<NixPathInfo[]> {
-  const { stdout } = await execFileAsync(
-    "nix",
-    ["path-info", "--json", "--recursive", ...paths],
-    { maxBuffer: 64 * 1024 * 1024 },
-  );
-
-  return parseNixPathInfoJson(stdout);
-}
-
 async function collectInputPaths(options: PushOptions): Promise<string[]> {
   const raw = [...options.paths];
-
   if (options.stdin) {
     const rl = readline.createInterface({ input: process.stdin });
     for await (const line of rl) {
@@ -129,9 +120,7 @@ async function collectInputPaths(options: PushOptions): Promise<string[]> {
     }
   }
 
-  const resolved = raw.map((item) => fs.realpathSync(item));
-
-  return [...new Set(resolved)].sort();
+  return [...new Set(raw.map((item) => fs.realpathSync(item)))].sort();
 }
 
 function createCachedToken(
@@ -151,29 +140,6 @@ function createCachedToken(
   };
 }
 
-async function requestOidcJwt(
-  requestUrl: string,
-  requestToken: string,
-  audience: string,
-): Promise<string> {
-  const separator = requestUrl.includes("?") ? "&" : "?";
-  const fullUrl = `${requestUrl}${separator}audience=${encodeURIComponent(audience)}`;
-  const response = await fetch(fullUrl, {
-    headers: { Authorization: `Bearer ${requestToken}` },
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-
-    throw new Error(
-      `GitHub Actions OIDC token request failed (${response.status}): ${body}`,
-    );
-  }
-
-  const data = await response.json<{ value: string }>();
-
-  return data.value;
-}
-
 function resolveAuth(serverUrl: string, options: PushOptions): AuthMode {
   if (options.token) {
     const bearer = options.token;
@@ -188,7 +154,6 @@ function resolveAuth(serverUrl: string, options: PushOptions): AuthMode {
       "no authentication credentials found: pass --token / FIRN_TOKEN for manual push, or run in GitHub Actions with `id-token: write`",
     );
   }
-
   const githubToken = process.env.GITHUB_TOKEN;
   if (!githubToken) {
     throw new Error(
@@ -198,24 +163,22 @@ function resolveAuth(serverUrl: string, options: PushOptions): AuthMode {
 
   return {
     kind: "oidc",
-    getBearer: createCachedToken(() =>
-      requestOidcJwt(requestUrl, requestToken, serverUrl),
-    ),
+    getBearer: createCachedToken(async () => {
+      const sep = requestUrl.includes("?") ? "&" : "?";
+      const res = await fetch(
+        `${requestUrl}${sep}audience=${encodeURIComponent(serverUrl)}`,
+        { headers: { Authorization: `Bearer ${requestToken}` } },
+      );
+      if (!res.ok) {
+        throw new Error(
+          `GitHub Actions OIDC token request failed (${res.status}): ${await res.text().catch(() => "")}`,
+        );
+      }
+
+      return (await res.json<{ value: string }>()).value;
+    }),
     githubToken,
   };
-}
-
-export class PushHttpError extends Error {
-  public readonly status: number;
-  public readonly body: string;
-  public readonly code: string | null;
-
-  constructor(url: string, status: number, body: string, code: string | null) {
-    super(`request to ${url} failed (${status}): ${body}`);
-    this.status = status;
-    this.body = body;
-    this.code = code;
-  }
 }
 
 async function postJson<TResp>(
@@ -232,12 +195,10 @@ async function postJson<TResp>(
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
-
     throw new PushHttpError(
       url,
       response.status,
-      text,
+      await response.text().catch(() => ""),
       response.headers.get("x-firn-error"),
     );
   }
@@ -245,111 +206,57 @@ async function postJson<TResp>(
   return await response.json();
 }
 
-const dumpAndCompressNar = async (
-  storePath: string,
-  zstdLevel: number,
-): Promise<DumpedNar> =>
-  new Promise((resolve, reject) => {
-    const child = spawn("nix-store", ["--dump", storePath], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const compressor = createZstdCompress({
-      params: { [zlibConstants.ZSTD_c_compressionLevel]: zstdLevel },
-    });
-
-    const narHasher = createHash("sha256");
-    const fileHasher = createHash("sha256");
-    const chunks: Buffer[] = [];
-    let narSize = 0;
-    let stderr = "";
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      narHasher.update(chunk);
-      narSize += chunk.length;
-    });
-
-    compressor.on("data", (chunk: Buffer) => {
-      fileHasher.update(chunk);
-      chunks.push(chunk);
-    });
-
-    let childExited = false;
-    let childCode: number | null = null;
-    let streamDone = false;
-
-    function finish() {
-      if (!childExited || !streamDone) {
-        return;
-      }
-      if (childCode !== 0) {
-        reject(
-          new Error(
-            `nix-store --dump ${storePath} exited with ${childCode}: ${stderr.trim()}`,
-          ),
-        );
-
-        return;
-      }
-
-      resolve({
-        compressed: Buffer.concat(chunks),
-        narSha256: narHasher.digest(),
-        narSize,
-        fileSha256: fileHasher.digest(),
-      });
-    }
-
-    child.on("error", reject);
-    compressor.on("error", reject);
-    child.on("close", (code) => {
-      childExited = true;
-      childCode = code;
-      finish();
-    });
-    compressor.on("end", () => {
-      streamDone = true;
-      finish();
-    });
-
-    child.stdout.pipe(compressor);
+async function dumpAndCompressNar(storePath: string, zstdLevel: number) {
+  const child = spawn("nix-store", ["--dump", storePath], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const compressor = createZstdCompress({
+    params: { [zlibConstants.ZSTD_c_compressionLevel]: zstdLevel },
   });
 
-async function uploadSinglePath(
-  oci: OciClient,
-  repository: string,
-  pushToken: string,
-  info: NixPathInfo,
-  zstdLevel: number,
-): Promise<CommitEntry> {
-  const dumped = await dumpAndCompressNar(info.path, zstdLevel);
-  if (dumped.narSize !== info.narSize) {
-    throw new Error(
-      `NAR size mismatch for ${info.path}: nix path-info reported ${info.narSize}, dump produced ${dumped.narSize}`,
-    );
-  }
+  const narHasher = createHash("sha256");
+  const fileHasher = createHash("sha256");
+  const chunks: Buffer[] = [];
+  let narSize = 0;
+  let stderr = "";
 
-  const blobDigest = encodeHex(dumped.fileSha256);
-  const manifestDigest = await oci.uploadNarBlob(
-    repository,
-    pushToken,
-    dumped.compressed,
-    blobDigest,
-  );
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  child.stdout.on("data", (chunk: Buffer) => {
+    narHasher.update(chunk);
+    narSize += chunk.length;
+  });
+  compressor.on("data", (chunk: Buffer) => {
+    fileHasher.update(chunk);
+    chunks.push(chunk);
+  });
+
+  const childDone = new Promise<void>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0
+        ? resolve()
+        : reject(
+            new Error(
+              `nix-store --dump ${storePath} exited with ${code}: ${stderr.trim()}`,
+            ),
+          ),
+    );
+  });
+  const streamDone = new Promise<void>((resolve, reject) => {
+    compressor.on("error", reject);
+    compressor.on("end", resolve);
+  });
+
+  child.stdout.pipe(compressor);
+  await Promise.all([childDone, streamDone]);
 
   return {
-    store_path: info.path,
-    nar_hash: formatSha256NixBase32(dumped.narSha256),
-    nar_size: dumped.narSize,
-    file_hash: formatSha256NixBase32(dumped.fileSha256),
-    file_size: dumped.compressed.length,
-    manifest_digest: manifestDigest,
-    blob_digest: blobDigest,
-    deriver: info.deriver,
-    references: info.references,
+    compressed: Buffer.concat(chunks),
+    narSha256: narHasher.digest(),
+    narSize,
+    fileSha256: fileHasher.digest(),
   };
 }
 
@@ -360,17 +267,17 @@ async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results: R[] = Array.from({ length: items.length });
   let nextIndex = 0;
-
-  const workers = Array.from(
-    { length: Math.min(Math.max(1, concurrency), items.length) },
-    async () => {
-      while (nextIndex < items.length) {
-        const current = nextIndex++;
-        results[current] = await fn(items[current]);
-      }
-    },
+  await Promise.all(
+    Array.from(
+      { length: Math.min(Math.max(1, concurrency), items.length) },
+      async () => {
+        while (nextIndex < items.length) {
+          const idx = nextIndex++;
+          results[idx] = await fn(items[idx]);
+        }
+      },
+    ),
   );
-  await Promise.all(workers);
 
   return results;
 }
@@ -380,7 +287,7 @@ function filterReachableFromBuiltOutputs(
   rootPaths: ReadonlySet<string>,
 ): NixPathInfo[] {
   const byBasename = new Map(
-    closure.map((item) => [item.path.slice("/nix/store/".length), item]),
+    closure.map((item) => [item.path.slice(11), item]),
   );
   const keep = new Set<string>();
   const queue: NixPathInfo[] = [];
@@ -395,7 +302,6 @@ function filterReachableFromBuiltOutputs(
       queue.push(item);
     }
   }
-
   for (const current of queue) {
     for (const ref of current.references) {
       const dep = byBasename.get(ref);
@@ -418,7 +324,12 @@ export async function runPush(options: PushOptions): Promise<void> {
     return;
   }
 
-  const rawClosure = await queryNixClosure(rawPaths);
+  const { stdout } = await execFileAsync(
+    "nix",
+    ["path-info", "--json", "--recursive", ...rawPaths],
+    { maxBuffer: 64 * 1024 * 1024 },
+  );
+  const rawClosure = parseNixPathInfoJson(stdout);
   const closure = options.excludeUnreferencedFods
     ? filterReachableFromBuiltOutputs(rawClosure, new Set(rawPaths))
     : rawClosure;
@@ -490,10 +401,7 @@ export async function runPush(options: PushOptions): Promise<void> {
           const refreshed = await postJson<PlanResponse>(
             `${serverUrl}/api/v1/uploads/plan`,
             await auth.getBearer(),
-            {
-              owner: options.owner,
-              store_paths: [],
-            } satisfies PlanRequest,
+            { owner: options.owner, store_paths: [] } satisfies PlanRequest,
           );
 
           return refreshed.ghcr_token!;
@@ -515,32 +423,46 @@ export async function runPush(options: PushOptions): Promise<void> {
     const entries = await mapWithConcurrency(
       chunk,
       options.jobs,
-      async (info) => {
-        const entry = await uploadSinglePath(
-          oci,
+      async (info): Promise<CommitEntry> => {
+        const dumped = await dumpAndCompressNar(info.path, options.zstdLevel);
+        if (dumped.narSize !== info.narSize) {
+          throw new Error(
+            `NAR size mismatch for ${info.path}: nix path-info reported ${info.narSize}, dump produced ${dumped.narSize}`,
+          );
+        }
+        const blobDigest = encodeHex(dumped.fileSha256);
+        const manifestDigest = await oci.uploadNarBlob(
           plan.ghcr_repository,
           pushToken,
-          info,
-          options.zstdLevel,
-        );
-        uploadedCount += 1;
-        uploadedBytes += entry.file_size;
-        uploadedNarBytes += entry.nar_size;
-        console.error(
-          `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${formatStorePath(info.path, err)} ${err.dim(`(${formatBytes(entry.file_size)} / ${formatBytes(entry.nar_size)} NAR)`)}`,
+          dumped.compressed,
+          blobDigest,
         );
 
-        return entry;
+        uploadedCount += 1;
+        uploadedBytes += dumped.compressed.length;
+        uploadedNarBytes += dumped.narSize;
+        console.error(
+          `  ${err.dim(`[${uploadedCount}/${missingInfos.length}]`)} ${formatStorePath(info.path, err)} ${err.dim(`(${formatBytes(dumped.compressed.length)} / ${formatBytes(dumped.narSize)} NAR)`)}`,
+        );
+
+        return {
+          store_path: info.path,
+          nar_hash: formatSha256NixBase32(dumped.narSha256),
+          nar_size: dumped.narSize,
+          file_hash: formatSha256NixBase32(dumped.fileSha256),
+          file_size: dumped.compressed.length,
+          manifest_digest: manifestDigest,
+          blob_digest: blobDigest,
+          deriver: info.deriver,
+          references: info.references,
+        };
       },
     );
 
     const committed = await postJson<CommitResponse>(
       `${serverUrl}/api/v1/uploads/commit`,
       await auth.getBearer(),
-      {
-        owner: options.owner,
-        entries,
-      } satisfies CommitRequest,
+      { owner: options.owner, entries } satisfies CommitRequest,
     );
     totalCommitted += committed.committed;
     if (totalBatches > 1) {
