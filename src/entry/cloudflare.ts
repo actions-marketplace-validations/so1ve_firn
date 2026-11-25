@@ -10,6 +10,12 @@ export interface CloudflareWorkerEnv extends ServerRuntimeEnv {
 
 const app = createApp<CloudflareWorkerEnv>(async (c) => ({
   db: d1Adapter(c.env.DB),
+  readDb: d1Adapter(
+    typeof c.env.DB.withSession === "function"
+      ? c.env.DB.withSession("first-unconstrained")
+      : c.env.DB,
+  ),
+  edgeCache: caches.default,
   config: await loadConfig(c.env, { defaultMaxGcSubrequests: 40 }),
   waitUntil: (promise) => {
     c.executionCtx.waitUntil(promise);

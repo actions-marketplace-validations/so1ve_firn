@@ -1360,4 +1360,151 @@ describe("firn worker", () => {
       /not listed in allowed_repos/,
     );
   });
+
+  it("caches 200 narinfo in edge cache without caching 404 misses", async () => {
+    const infoRes = await callWorker("/nix-cache-info");
+
+    expect(infoRes.status).toBe(200);
+    expect(infoRes.headers.get("cache-control")).toBe("public, max-age=3600");
+
+    const hash = "99999999999999999999999999999999";
+    const missRes = await callWorker(`/${hash}.narinfo`);
+
+    expect(missRes.status).toBe(404);
+    expect(missRes.headers.get("cache-control")).toBe("no-store");
+
+    const mainJwt = await issueOidcJwt({});
+    await uploadAndCommit(
+      mainJwt,
+      "so1ve/latchshot-cache",
+      `/nix/store/${hash}-cached`,
+      "edge-cached-nar",
+    );
+
+    const firstHit = await callWorker(`/${hash}.narinfo`);
+
+    expect(firstHit.status).toBe(200);
+    expect(firstHit.headers.get("cache-control")).toBe("public, max-age=3600");
+
+    const firstBody = await firstHit.text();
+
+    // Subsequent hits (even with ignored query params) must serve from caches.default without touching D1.
+    const originalDb = testEnv.DB;
+    const throwingDb = {
+      prepare() {
+        throw new Error("D1 should not be queried on edge cache hit");
+      },
+      batch() {
+        throw new Error("D1 should not be queried on edge cache hit");
+      },
+      withSession() {
+        return throwingDb;
+      },
+    } as unknown as D1Database;
+    testEnv.DB = throwingDb;
+    try {
+      const cachedHit = await callWorker(`/${hash}.narinfo?bust=1`);
+
+      expect(cachedHit.status).toBe(200);
+      await expect(cachedHit.text()).resolves.toBe(firstBody);
+    } finally {
+      testEnv.DB = originalDb;
+    }
+
+    // PR narinfo gets a shorter edge cache TTL.
+    const prJwt = await issueOidcJwt({
+      ref: "refs/pull/88/merge",
+      event_name: "pull_request",
+    });
+    const prHash = "88888888888888888888888888888888";
+    await uploadAndCommit(
+      prJwt,
+      "so1ve/latchshot-cache",
+      `/nix/store/${prHash}-pr-cached`,
+      "pr-cached-nar",
+    );
+    const prRes = await callWorker(`/pr/so1ve/latchshot/88/${prHash}.narinfo`);
+
+    expect(prRes.status).toBe(200);
+    expect(prRes.headers.get("cache-control")).toBe("public, max-age=300");
+  });
+
+  it("uses D1 read sessions for cache reads and returns 429 with Retry-After on D1 overload", async () => {
+    const baseDb = testEnv.DB;
+    const sessionConstraints: unknown[] = [];
+    let sessionQueries = 0;
+
+    testEnv.DB = {
+      prepare: (sql: string) => baseDb.prepare(sql),
+      batch: (stmts: D1PreparedStatement[]) => baseDb.batch(stmts),
+      withSession(constraint?: D1SessionBookmark | D1SessionConstraint) {
+        sessionConstraints.push(constraint);
+        const session =
+          typeof baseDb.withSession === "function"
+            ? baseDb.withSession(constraint)
+            : baseDb;
+
+        return {
+          prepare(sql: string) {
+            sessionQueries += 1;
+
+            return session.prepare(sql);
+          },
+          batch: (stmts: D1PreparedStatement[]) => session.batch(stmts),
+          getBookmark: () => null,
+        } as unknown as D1DatabaseSession;
+      },
+    } as unknown as D1Database;
+
+    const missHash = "77777777777777777777777777777777";
+    const missRes = await callWorker(`/${missHash}.narinfo`);
+
+    expect(missRes.status).toBe(404);
+    expect(sessionConstraints).toContain("first-unconstrained");
+    expect(sessionQueries).toBeGreaterThan(0);
+
+    const overloadedStatement = {
+      bind() {
+        return overloadedStatement;
+      },
+      first() {
+        return Promise.reject(
+          new Error(
+            "D1_ERROR: D1 DB is overloaded. Too many resources consumed within a 10 second window.",
+          ),
+        );
+      },
+      all() {
+        return Promise.reject(
+          new Error(
+            "D1_ERROR: D1 DB is overloaded. Too many resources consumed within a 10 second window.",
+          ),
+        );
+      },
+      run() {
+        return Promise.reject(
+          new Error(
+            "D1_ERROR: D1 DB is overloaded. Too many resources consumed within a 10 second window.",
+          ),
+        );
+      },
+    };
+    const overloadedDb = {
+      prepare: () => overloadedStatement,
+      batch: () =>
+        Promise.reject(
+          new Error(
+            "D1_ERROR: D1 DB is overloaded. Too many resources consumed within a 10 second window.",
+          ),
+        ),
+      withSession: () => overloadedDb,
+    } as unknown as D1Database;
+
+    testEnv.DB = overloadedDb;
+    const throttledRes = await callWorker(`/${missHash}.narinfo`);
+
+    expect(throttledRes.status).toBe(429);
+    expect(throttledRes.headers.get("retry-after")).toBe("5");
+    expect(throttledRes.headers.get("cache-control")).toBe("no-store");
+  });
 });

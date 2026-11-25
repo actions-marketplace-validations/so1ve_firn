@@ -30,8 +30,30 @@ import {
 } from "./routes/upload.ts";
 import { handleWebhook } from "./routes/webhook.ts";
 
+export interface EdgeCache {
+  match: (request: Request) => Promise<Response | undefined>;
+  put: (request: Request, response: Response) => Promise<void>;
+}
+
+const DB_OVERLOADED_RE =
+  /D1 DB is overloaded|DB overloaded|Too many resources consumed|database is overloaded/i;
+
+export function isDatabaseOverloadedError(error: unknown): boolean {
+  if (DB_OVERLOADED_RE.test(errorMessage(error))) {
+    return true;
+  }
+
+  return (
+    error instanceof Error &&
+    error.cause !== undefined &&
+    DB_OVERLOADED_RE.test(errorMessage(error.cause))
+  );
+}
+
 export interface AppContext {
   db: SqlDatabase;
+  readDb?: SqlDatabase;
+  edgeCache?: EdgeCache;
   config: LoadedConfig;
   waitUntil?: (promise: Promise<unknown>) => void;
 }
@@ -40,6 +62,8 @@ export interface AppBindings<E extends object = object> {
   Bindings: E;
   Variables: {
     db: SqlDatabase;
+    readDb: SqlDatabase;
+    edgeCache: EdgeCache | undefined;
     config: LoadedConfig;
     waitUntil: (promise: Promise<unknown>) => void;
   };
@@ -71,6 +95,8 @@ export function createApp<E extends object = object>(
   app.use("*", async (c, next) => {
     const resolved = await resolveContext(c);
     c.set("db", resolved.db);
+    c.set("readDb", resolved.readDb ?? resolved.db);
+    c.set("edgeCache", resolved.edgeCache);
     c.set("config", resolved.config);
     c.set("waitUntil", resolved.waitUntil ?? defaultWaitUntil);
     await next();
@@ -108,6 +134,21 @@ export function createApp<E extends object = object>(
       );
     }
     const message = errorMessage(error);
+    if (isDatabaseOverloadedError(error)) {
+      console.warn(
+        JSON.stringify({
+          message: "database overloaded",
+          method: c.req.method,
+          path: c.req.path,
+          error: message,
+        }),
+      );
+
+      return c.text("database overloaded, please retry", 429, {
+        "Retry-After": "5",
+        "Cache-Control": "no-store",
+      });
+    }
     console.error(
       JSON.stringify({
         message: "unhandled server error",

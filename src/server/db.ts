@@ -39,7 +39,9 @@ export interface CloseableSqlDatabase extends SqlDatabase {
   close: () => void;
 }
 
-export function d1Adapter(db: D1Database): SqlDatabase {
+export type D1Queryable = Pick<D1Database, "prepare" | "batch">;
+
+export function d1Adapter(db: D1Queryable): SqlDatabase {
   const prepare = (sql: string, params: readonly SqlParam[] = []) =>
     params.length > 0 ? db.prepare(sql).bind(...params) : db.prepare(sql);
 
@@ -150,14 +152,21 @@ export async function existingStoreHashes(
   hashes: readonly string[],
 ): Promise<Set<string>> {
   const present = new Set<string>();
+  const isMain = scope === MAIN_SCOPE;
   for (const chunk of chunks(hashes)) {
-    const placeholders = chunk.map((_, idx) => `?${idx + 2}`).join(", ");
-    const rows = await db.all<{ store_hash: string }>(
-      `SELECT DISTINCT store_hash
-       FROM store_paths
-       WHERE scope IN (?1, 'main') AND store_hash IN (${placeholders})`,
-      [scope, ...chunk],
-    );
+    const rows = isMain
+      ? await db.all<{ store_hash: string }>(
+          `SELECT store_hash
+           FROM store_paths
+           WHERE scope = 'main' AND store_hash IN (${chunk.map((_, idx) => `?${idx + 1}`).join(", ")})`,
+          chunk,
+        )
+      : await db.all<{ store_hash: string }>(
+          `SELECT DISTINCT store_hash
+           FROM store_paths
+           WHERE scope IN (?1, 'main') AND store_hash IN (${chunk.map((_, idx) => `?${idx + 2}`).join(", ")})`,
+          [scope, ...chunk],
+        );
     for (const row of rows) {
       present.add(row.store_hash);
     }
@@ -254,34 +263,48 @@ export async function commitEntries(
   return records.length;
 }
 
+interface NarInfoRow {
+  id: number;
+  store_path: string;
+  nar_hash: string;
+  nar_size: number;
+  file_hash: string;
+  file_size: number;
+  blob_digest: string;
+  deriver: string | null;
+  references_json: string;
+  signature: string;
+  last_accessed_at: number;
+}
+
 export async function getNarInfo(
   db: SqlDatabase,
   scope: string,
   storeHash: string,
 ): Promise<StoredNarInfo | null> {
-  const row = await db.first<{
-    id: number;
-    store_path: string;
-    nar_hash: string;
-    nar_size: number;
-    file_hash: string;
-    file_size: number;
-    blob_digest: string;
-    deriver: string | null;
-    references_json: string;
-    signature: string;
-    last_accessed_at: number;
-  }>(
-    `SELECT sp.id, sp.store_path, sp.nar_hash, sp.nar_size, sp.file_hash,
-            b.file_size, b.blob_digest, sp.deriver, sp.references_json,
-            sp.signature, sp.last_accessed_at
-     FROM store_paths sp
-     JOIN blobs b ON b.id = sp.blob_id
-     WHERE sp.scope IN (?1, 'main') AND sp.store_hash = ?2
-     ORDER BY CASE WHEN sp.scope = ?1 THEN 0 ELSE 1 END
-     LIMIT 1`,
-    [scope, storeHash],
-  );
+  const row =
+    scope === MAIN_SCOPE
+      ? await db.first<NarInfoRow>(
+          `SELECT sp.id, sp.store_path, sp.nar_hash, sp.nar_size, sp.file_hash,
+                  b.file_size, b.blob_digest, sp.deriver, sp.references_json,
+                  sp.signature, sp.last_accessed_at
+           FROM store_paths sp
+           JOIN blobs b ON b.id = sp.blob_id
+           WHERE sp.scope = 'main' AND sp.store_hash = ?1
+           LIMIT 1`,
+          [storeHash],
+        )
+      : await db.first<NarInfoRow>(
+          `SELECT sp.id, sp.store_path, sp.nar_hash, sp.nar_size, sp.file_hash,
+                  b.file_size, b.blob_digest, sp.deriver, sp.references_json,
+                  sp.signature, sp.last_accessed_at
+           FROM store_paths sp
+           JOIN blobs b ON b.id = sp.blob_id
+           WHERE sp.scope IN (?1, 'main') AND sp.store_hash = ?2
+           ORDER BY CASE WHEN sp.scope = ?1 THEN 0 ELSE 1 END
+           LIMIT 1`,
+          [scope, storeHash],
+        );
   if (!row) {
     return null;
   }
@@ -306,17 +329,30 @@ export async function getBlobForDownload(
   scope: string,
   blobDigest: string,
 ): Promise<BlobRecord | null> {
-  const row = await db.first<BlobRow>(
-    `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
-     FROM blobs b
-     WHERE b.blob_digest = ?1
-       AND EXISTS (
-         SELECT 1 FROM store_paths sp
-         WHERE sp.blob_id = b.id AND sp.scope IN (?2, 'main')
-       )
-     LIMIT 1`,
-    [blobDigest, scope],
-  );
+  const row =
+    scope === MAIN_SCOPE
+      ? await db.first<BlobRow>(
+          `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
+           FROM blobs b
+           WHERE b.blob_digest = ?1
+             AND EXISTS (
+               SELECT 1 FROM store_paths sp
+               WHERE sp.blob_id = b.id AND sp.scope = 'main'
+             )
+           LIMIT 1`,
+          [blobDigest],
+        )
+      : await db.first<BlobRow>(
+          `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
+           FROM blobs b
+           WHERE b.blob_digest = ?1
+             AND EXISTS (
+               SELECT 1 FROM store_paths sp
+               WHERE sp.blob_id = b.id AND sp.scope IN (?2, 'main')
+             )
+           LIMIT 1`,
+          [blobDigest, scope],
+        );
 
   return row ? mapBlobRow(row) : null;
 }

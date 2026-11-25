@@ -2,6 +2,7 @@ import type { Context } from "hono";
 
 import { unixNow } from "../../shared/nix-format.ts";
 import type { AppBindings } from "../app.ts";
+import type { SqlDatabase } from "../db.ts";
 import {
   cacheStats,
   listOwnerSummaries,
@@ -14,7 +15,7 @@ export async function handleDashboard(
   c: Context<AppBindings>,
 ): Promise<Response> {
   const config = c.get("config");
-  const db = c.get("db");
+  const db = c.get("readDb");
   const [cache, owners, prs, paths] = await Promise.all([
     cacheStats(db),
     listOwnerSummaries(db, config.ownersByName.values()),
@@ -43,6 +44,7 @@ export async function handleDashboard(
 export async function respondWithStorePaths(
   c: Context<AppBindings>,
   maxLimit: number,
+  db: SqlDatabase = c.get("db"),
 ): Promise<Response> {
   const owner = c.req.query("owner") || null;
   if (owner && !c.get("config").ownersByName.has(owner)) {
@@ -60,10 +62,8 @@ export async function respondWithStorePaths(
       ? Math.min(limitRaw, maxLimit)
       : 50;
 
-  return c.json(
-    await listStorePaths(c.get("db"), owner, scope, limit, query, sort),
-  );
+  return c.json(await listStorePaths(db, owner, scope, limit, query, sort));
 }
 
 export const handlePublicPaths = (c: Context<AppBindings>): Promise<Response> =>
-  respondWithStorePaths(c, 200);
+  respondWithStorePaths(c, 200, c.get("readDb"));

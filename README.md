@@ -116,6 +116,13 @@ pnpm exec wrangler secret put ADMIN_TOKEN
 pnpm run deploy
 ```
 
+> **High-concurrency CI tip**: Enable **Read Replication** on the D1 database in
+> the Cloudflare dashboard. Firn automatically routes read-only cache lookups
+> through D1 `first-unconstrained` read sessions, edge-caches `200` `.narinfo`
+> hits in `caches.default` (never caching `404` misses), and returns `429` with
+> `Retry-After` if D1 temporarily hits its resource limit so Nix backs off
+> cleanly.
+
 ## Self-Hosting (Node.js / Docker / NixOS)
 
 Self-hosted Firn uses Node 24's built-in `node:sqlite` (zero native builds),
