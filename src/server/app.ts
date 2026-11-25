@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { errorMessage } from "../shared/format.ts";
 import type { LoadedConfig } from "./config.ts";
 import type { SqlDatabase } from "./db.ts";
+import { log } from "./log.ts";
 import {
   handleAdminDeletePaths,
   handleAdminDeletePr,
@@ -23,12 +24,21 @@ import {
   handlePublicKeys,
 } from "./routes/cache.ts";
 import { handleDashboard, handlePublicPaths } from "./routes/ui.ts";
-import {
-  HttpError,
-  handleUploadCommit,
-  handleUploadPlan,
-} from "./routes/upload.ts";
+import { handleUploadCommit, handleUploadPlan } from "./routes/upload.ts";
 import { handleWebhook } from "./routes/webhook.ts";
+
+export type HttpErrorStatus = 400 | 401 | 403 | 404 | 503;
+
+export class HttpError extends Error {
+  public readonly status: HttpErrorStatus;
+  public readonly code: string | undefined;
+
+  constructor(status: HttpErrorStatus, message: string, code?: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
 
 export interface EdgeCache {
   match: (request: Request) => Promise<Response | undefined>;
@@ -38,17 +48,11 @@ export interface EdgeCache {
 const DB_OVERLOADED_RE =
   /D1 DB is overloaded|DB overloaded|Too many resources consumed|database is overloaded/i;
 
-export function isDatabaseOverloadedError(error: unknown): boolean {
-  if (DB_OVERLOADED_RE.test(errorMessage(error))) {
-    return true;
-  }
-
-  return (
-    error instanceof Error &&
+export const isDatabaseOverloadedError = (error: unknown): boolean =>
+  DB_OVERLOADED_RE.test(errorMessage(error)) ||
+  (error instanceof Error &&
     error.cause !== undefined &&
-    DB_OVERLOADED_RE.test(errorMessage(error.cause))
-  );
-}
+    DB_OVERLOADED_RE.test(errorMessage(error.cause)));
 
 export interface AppContext {
   db: SqlDatabase;
@@ -73,14 +77,34 @@ export type AppContextResolver<E extends object = object> = (
   c: Context<AppBindings<E>>,
 ) => AppContext | Promise<AppContext>;
 
+export function parseOwnerQuery(c: Context<AppBindings>): string | null {
+  const owner = c.req.query("owner") || null;
+  if (owner && !c.get("config").ownersByName.has(owner)) {
+    throw new HttpError(400, `unknown owner '${owner}'`);
+  }
+
+  return owner;
+}
+
+export function parsePrParams(
+  c: Context<AppBindings>,
+  invalidNumberStatus: 400 | 404,
+): { owner: string; repo: string; prNumber: number } {
+  const owner = c.req.param("owner") ?? "";
+  if (!c.get("config").ownersByName.has(owner)) {
+    throw new HttpError(404, `unknown owner '${owner}'`);
+  }
+  const prNumber = Number.parseInt(c.req.param("number") ?? "", 10);
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
+    throw new HttpError(invalidNumberStatus, "invalid pull request number");
+  }
+
+  return { owner, repo: c.req.param("repo") ?? "", prNumber };
+}
+
 function defaultWaitUntil(promise: Promise<unknown>): void {
   void promise.catch((error: unknown) => {
-    console.error(
-      JSON.stringify({
-        message: "background task failed",
-        error: errorMessage(error),
-      }),
-    );
+    log.error("background task failed", { error: errorMessage(error) });
   });
 }
 
@@ -90,7 +114,7 @@ export function createApp<E extends object = object>(
   const app = new Hono<AppBindings<E>>();
 
   app.get("/healthz", (c) => c.text("ok\n"));
-  app.get("/nix-cache-info", () => handleMainCacheInfo());
+  app.get("/nix-cache-info", handleMainCacheInfo);
 
   app.use("*", async (c, next) => {
     const resolved = await resolveContext(c);
@@ -135,28 +159,22 @@ export function createApp<E extends object = object>(
     }
     const message = errorMessage(error);
     if (isDatabaseOverloadedError(error)) {
-      console.warn(
-        JSON.stringify({
-          message: "database overloaded",
-          method: c.req.method,
-          path: c.req.path,
-          error: message,
-        }),
-      );
+      log.warn("database overloaded", {
+        method: c.req.method,
+        path: c.req.path,
+        error: message,
+      });
 
       return c.text("database overloaded, please retry", 429, {
         "Retry-After": "5",
         "Cache-Control": "no-store",
       });
     }
-    console.error(
-      JSON.stringify({
-        message: "unhandled server error",
-        method: c.req.method,
-        path: c.req.path,
-        error: message,
-      }),
-    );
+    log.error("unhandled server error", {
+      method: c.req.method,
+      path: c.req.path,
+      error: message,
+    });
 
     return c.text(message, 500);
   });

@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 
-import { errorMessage } from "../../shared/format.ts";
+import { MAIN_SCOPE, errorMessage, prScope } from "../../shared/format.ts";
 import {
   fingerprint,
   normalizeReferences,
@@ -18,7 +18,8 @@ import type {
   PlanRequest,
   PlanResponse,
 } from "../../shared/protocol.ts";
-import type { AppBindings } from "../app.ts";
+import type { AppBindings, HttpErrorStatus } from "../app.ts";
+import { HttpError } from "../app.ts";
 import type { LoadedConfig, LoadedOwner } from "../config.ts";
 import {
   ghcrPackageForRepo,
@@ -27,12 +28,7 @@ import {
   isRepoAllowed,
 } from "../config.ts";
 import type { CommitRecord } from "../db.ts";
-import {
-  MAIN_SCOPE,
-  commitEntries,
-  existingStoreHashes,
-  prScope,
-} from "../db.ts";
+import { commitEntries, existingStoreHashes } from "../db.ts";
 import {
   GhcrAuthUnavailableError,
   acquirePullToken,
@@ -41,17 +37,7 @@ import {
   extractBearerToken,
   verifyOidcToken,
 } from "../github.ts";
-
-export class HttpError extends Error {
-  public readonly status: 400 | 401 | 403 | 503;
-  public readonly code: string | undefined;
-
-  constructor(status: 400 | 401 | 403 | 503, message: string, code?: string) {
-    super(message);
-    this.status = status;
-    this.code = code;
-  }
-}
+import { log } from "../log.ts";
 
 interface AuthenticatedUpload {
   owner: LoadedOwner;
@@ -61,15 +47,11 @@ interface AuthenticatedUpload {
   needsGhcrToken: boolean;
 }
 
-function tryHttp<T>(
-  status: 400 | 401 | 403 | 503,
-  fn: () => T,
-  prefix = "",
-): T {
+function tryHttp<T>(status: HttpErrorStatus, fn: () => T): T {
   try {
     return fn();
   } catch (error) {
-    throw new HttpError(status, `${prefix}${errorMessage(error)}`);
+    throw new HttpError(status, errorMessage(error));
   }
 }
 
@@ -129,9 +111,7 @@ async function authenticate(
     token,
   ).catch((error: unknown) => {
     const message = errorMessage(error);
-    console.warn(
-      JSON.stringify({ message: "OIDC authentication failed", error: message }),
-    );
+    log.warn("OIDC authentication failed", { error: message });
 
     throw new HttpError(401, `invalid credentials: ${message}`);
   });
@@ -271,13 +251,12 @@ export async function handleUploadPlan(
   const missing = hashes.filter((hash) => !existing.has(hash));
   const repo = ghcrRepository(auth.owner.name, auth.ghcrPackage);
 
-  const oci = new OciClient(config.registryUrl);
   let ghcrToken: string | undefined;
   if (auth.needsGhcrToken) {
     ghcrToken = await exchangeInstallationGhcrToken(
       config,
       auth.owner,
-      oci,
+      new OciClient(config.registryUrl),
       repo,
       "pull,push",
     ).catch((error: unknown) => {
@@ -289,17 +268,14 @@ export async function handleUploadPlan(
     });
   }
 
-  console.log(
-    JSON.stringify({
-      message: "planned cache upload",
-      owner: auth.owner.name,
-      scope: auth.scope,
-      repository: repo,
-      total: hashes.length,
-      missing: missing.length,
-      manual: auth.needsGhcrToken,
-    }),
-  );
+  log.info("planned cache upload", {
+    owner: auth.owner.name,
+    scope: auth.scope,
+    repository: repo,
+    total: hashes.length,
+    missing: missing.length,
+    manual: auth.needsGhcrToken,
+  });
 
   return c.json({
     owner: auth.owner.name,
@@ -333,15 +309,12 @@ export async function handleUploadCommit(
   );
   const committed = await commitEntries(c.get("db"), records);
 
-  console.log(
-    JSON.stringify({
-      message: "committed cache entries",
-      owner: auth.owner.name,
-      scope: auth.scope,
-      repository: repo,
-      committed,
-    }),
-  );
+  log.info("committed cache entries", {
+    owner: auth.owner.name,
+    scope: auth.scope,
+    repository: repo,
+    committed,
+  });
 
   return c.json({
     owner: auth.owner.name,

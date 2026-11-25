@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 
-import { errorMessage } from "../../shared/format.ts";
+import { MAIN_SCOPE, errorMessage, prScope } from "../../shared/format.ts";
 import {
   CACHE_PRIORITY,
   renderNarInfo,
@@ -12,32 +12,27 @@ import {
 import { OciClient } from "../../shared/oci.ts";
 import type { PublicKeysResponse } from "../../shared/protocol.ts";
 import type { AppBindings } from "../app.ts";
-import { isDatabaseOverloadedError } from "../app.ts";
+import { isDatabaseOverloadedError, parsePrParams } from "../app.ts";
 import { ghcrRepository } from "../config.ts";
 import {
-  MAIN_SCOPE,
   TOUCH_THROTTLE_SECONDS,
   getBlobForDownload,
   getNarInfo,
-  prScope,
   touchAccessedThrottled,
 } from "../db.ts";
 import { acquirePullToken } from "../github.ts";
+import { log } from "../log.ts";
 
-const CACHE_INFO_MAX_AGE_SECONDS = 3600;
-const MAIN_NARINFO_MAX_AGE_SECONDS = 3600;
-const PR_NARINFO_MAX_AGE_SECONDS = 300;
+const CACHE_INFO_MAX_AGE = 3600;
+const MAIN_NARINFO_MAX_AGE = 3600;
+const PR_NARINFO_MAX_AGE = 300;
 
-const textResponse = (
-  body: string,
-  contentType: string,
-  cacheControl?: string,
-): Response =>
+const textResponse = (body: string, contentType: string, maxAge: number) =>
   new Response(body, {
     status: 200,
     headers: {
       "Content-Type": contentType,
-      ...(cacheControl ? { "Cache-Control": cacheControl } : {}),
+      "Cache-Control": `public, max-age=${maxAge}`,
     },
   });
 
@@ -47,17 +42,10 @@ function narInfoCacheKeyForUrl(rawUrl: string): Request {
   return new Request(`${url.origin}${url.pathname}`, { method: "GET" });
 }
 
-function resolvePrScope(c: Context<AppBindings>): string | Response {
-  const owner = c.req.param("owner") ?? "";
-  if (!c.get("config").ownersByName.has(owner)) {
-    return c.text("unknown cache owner", 404);
-  }
-  const prNumber = Number.parseInt(c.req.param("number") ?? "", 10);
-  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
-    return c.text("invalid pull request number", 404);
-  }
+function prScopeFromParams(c: Context<AppBindings>): string {
+  const { owner, repo, prNumber } = parsePrParams(c, 404);
 
-  return prScope(owner, c.req.param("repo") ?? "", prNumber);
+  return prScope(owner, repo, prNumber);
 }
 
 async function serveNarInfo(
@@ -95,23 +83,16 @@ async function serveNarInfo(
       touchAccessedThrottled(c.get("db"), stored.id, now).catch(
         (error: unknown) => {
           if (!isDatabaseOverloadedError(error)) {
-            console.warn(
-              JSON.stringify({
-                message: "failed to update last_accessed_at",
-                id: stored.id,
-                error: errorMessage(error),
-              }),
-            );
+            log.warn("failed to update last_accessed_at", {
+              id: stored.id,
+              error: errorMessage(error),
+            });
           }
         },
       ),
     );
   }
 
-  const maxAge =
-    scope === MAIN_SCOPE
-      ? MAIN_NARINFO_MAX_AGE_SECONDS
-      : PR_NARINFO_MAX_AGE_SECONDS;
   const response = textResponse(
     renderNarInfo({
       ...stored,
@@ -119,18 +100,15 @@ async function serveNarInfo(
       sig: stored.signature,
     }),
     "text/x-nix-narinfo",
-    `public, max-age=${maxAge}`,
+    scope === MAIN_SCOPE ? MAIN_NARINFO_MAX_AGE : PR_NARINFO_MAX_AGE,
   );
   if (edgeCache && cacheKey) {
     c.get("waitUntil")(
       edgeCache.put(cacheKey, response.clone()).catch((error: unknown) => {
-        console.warn(
-          JSON.stringify({
-            message: "failed to populate edge cache",
-            path: c.req.path,
-            error: errorMessage(error),
-          }),
-        );
+        log.warn("failed to populate edge cache", {
+          path: c.req.path,
+          error: errorMessage(error),
+        });
       }),
     );
   }
@@ -187,7 +165,7 @@ export const handleMainCacheInfo = (): Response =>
   textResponse(
     renderNixCacheInfo(CACHE_PRIORITY),
     "text/x-nix-cache-info",
-    `public, max-age=${CACHE_INFO_MAX_AGE_SECONDS}`,
+    CACHE_INFO_MAX_AGE,
   );
 
 export function handlePrCacheInfo(c: Context<AppBindings>): Response {
@@ -199,26 +177,14 @@ export function handlePrCacheInfo(c: Context<AppBindings>): Response {
   return handleMainCacheInfo();
 }
 
-export const handleMainNarInfo = (c: Context<AppBindings>): Promise<Response> =>
+export const handleMainNarInfo = (c: Context<AppBindings>) =>
   serveNarInfo(c, MAIN_SCOPE, c.req.param("narinfo") ?? "");
 
-export async function handlePrNarInfo(
-  c: Context<AppBindings>,
-): Promise<Response> {
-  const scope = resolvePrScope(c);
+export const handlePrNarInfo = (c: Context<AppBindings>) =>
+  serveNarInfo(c, prScopeFromParams(c), c.req.param("narinfo") ?? "");
 
-  return typeof scope === "string"
-    ? serveNarInfo(c, scope, c.req.param("narinfo") ?? "")
-    : scope;
-}
-
-export const handleMainNar = (c: Context<AppBindings>): Promise<Response> =>
+export const handleMainNar = (c: Context<AppBindings>) =>
   serveNar(c, MAIN_SCOPE, c.req.param("file") ?? "");
 
-export async function handlePrNar(c: Context<AppBindings>): Promise<Response> {
-  const scope = resolvePrScope(c);
-
-  return typeof scope === "string"
-    ? serveNar(c, scope, c.req.param("file") ?? "")
-    : scope;
-}
+export const handlePrNar = (c: Context<AppBindings>) =>
+  serveNar(c, prScopeFromParams(c), c.req.param("file") ?? "");

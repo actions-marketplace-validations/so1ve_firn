@@ -3,6 +3,7 @@ import type { Context, Next } from "hono";
 import { validateStoreHash } from "../../shared/nix-format.ts";
 import type { AdminStatusResponse } from "../../shared/protocol.ts";
 import type { AppBindings } from "../app.ts";
+import { HttpError, parseOwnerQuery, parsePrParams } from "../app.ts";
 import {
   cacheStats,
   deletePrScope,
@@ -20,21 +21,20 @@ export async function requireAdmin(
 ): Promise<Response | void> {
   const adminToken = c.get("config").adminToken;
   if (!adminToken) {
-    return c.text("admin API is not enabled (ADMIN_TOKEN not set)", 404);
+    throw new HttpError(404, "admin API is not enabled (ADMIN_TOKEN not set)");
   }
   const candidate = extractBearerToken(c.req.header("authorization"));
   if (!candidate) {
-    return c.text("missing or invalid Bearer Authorization header", 401);
+    throw new HttpError(401, "missing or invalid Bearer Authorization header");
   }
   if (!(await timingSafeEqualString(adminToken, candidate))) {
-    return c.text("invalid admin token", 401);
+    throw new HttpError(401, "invalid admin token");
   }
   await next();
 }
 
-export const handleAdminListPaths = (
-  c: Context<AppBindings>,
-): Promise<Response> => respondWithStorePaths(c, 500);
+export const handleAdminListPaths = (c: Context<AppBindings>) =>
+  respondWithStorePaths(c, 500);
 
 export async function handleAdminStatus(
   c: Context<AppBindings>,
@@ -64,10 +64,7 @@ export async function handleAdminStatus(
 export async function handleAdminDeletePaths(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  const owner = c.req.query("owner") || null;
-  if (owner && !c.get("config").ownersByName.has(owner)) {
-    return c.text(`unknown owner '${owner}'`, 400);
-  }
+  const owner = parseOwnerQuery(c);
   const scope = c.req.query("scope") || null;
   const query = c.req.query("q")?.trim() || null;
   const hash = c.req.query("hash")?.trim() || null;
@@ -75,50 +72,35 @@ export async function handleAdminDeletePaths(
     try {
       validateStoreHash(hash);
     } catch {
-      return c.text(`invalid store hash '${hash}'`, 400);
+      throw new HttpError(400, `invalid store hash '${hash}'`);
     }
   }
   if (!owner && !scope && !query && !hash) {
-    return c.text(
-      "at least one filter (owner, scope, q, or hash) is required",
+    throw new HttpError(
       400,
+      "at least one filter (owner, scope, q, or hash) is required",
     );
   }
 
-  const removed = await deleteStorePaths(c.get("db"), {
-    ownerId: owner,
-    scope,
-    storeHash: hash,
-    query,
+  return c.json({
+    removed: await deleteStorePaths(c.get("db"), {
+      ownerId: owner,
+      scope,
+      storeHash: hash,
+      query,
+    }),
   });
-
-  return c.json({ removed });
 }
 
-export async function handleAdminListPrs(
+export const handleAdminListPrs = async (
   c: Context<AppBindings>,
-): Promise<Response> {
-  const owner = c.req.query("owner") || null;
-  if (owner && !c.get("config").ownersByName.has(owner)) {
-    return c.text(`unknown owner '${owner}'`, 400);
-  }
-
-  return c.json(await listPrScopes(c.get("db"), owner));
-}
+): Promise<Response> =>
+  c.json(await listPrScopes(c.get("db"), parseOwnerQuery(c)));
 
 export async function handleAdminDeletePr(
   c: Context<AppBindings>,
 ): Promise<Response> {
-  const owner = c.req.param("owner") ?? "";
-  if (!c.get("config").ownersByName.has(owner)) {
-    return c.text(`unknown owner '${owner}'`, 404);
-  }
-  const repo = c.req.param("repo") ?? "";
-  const prNumber = Number.parseInt(c.req.param("number") ?? "", 10);
-  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
-    return c.text("invalid pull request number", 400);
-  }
-
+  const { owner, repo, prNumber } = parsePrParams(c, 400);
   const removed = await deletePrScope(c.get("db"), owner, repo, prNumber);
 
   return c.json({ owner, repo, pr_number: prNumber, removed });

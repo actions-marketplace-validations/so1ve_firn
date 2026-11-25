@@ -4,6 +4,7 @@ import { errorMessage } from "../../shared/format.ts";
 import type { AppBindings } from "../app.ts";
 import { deletePrScope } from "../db.ts";
 import { verifyWebhookSignature } from "../github.ts";
+import { log } from "../log.ts";
 
 interface PullRequestWebhook {
   action: string;
@@ -27,11 +28,7 @@ export async function handleWebhook(
   if (
     !(await verifyWebhookSignature(config.webhookSecret, sigHeader, rawBody))
   ) {
-    console.warn(
-      JSON.stringify({
-        message: "rejected GitHub webhook with invalid signature",
-      }),
-    );
+    log.warn("rejected GitHub webhook with invalid signature");
 
     return c.text("invalid webhook signature", 401);
   }
@@ -57,15 +54,12 @@ export async function handleWebhook(
         payload.repository.name,
         payload.pull_request.number,
       );
-      console.log(
-        JSON.stringify({
-          message: "cleaned PR overlay on pull_request closed webhook",
-          owner: owner.name,
-          repo: payload.repository.name,
-          pr: payload.pull_request.number,
-          removed,
-        }),
-      );
+      log.info("cleaned PR overlay on pull_request closed webhook", {
+        owner: owner.name,
+        repo: payload.repository.name,
+        pr: payload.pull_request.number,
+        removed,
+      });
     }
   }
 

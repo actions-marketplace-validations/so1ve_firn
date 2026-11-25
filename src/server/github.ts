@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
+import { readBody, stripTrailingSlash } from "../shared/format.ts";
 import {
   base64ToBytes,
   bytesToBase64,
@@ -8,10 +9,17 @@ import {
 } from "../shared/nix-format.ts";
 import type { OciClient } from "../shared/oci.ts";
 import { OciHttpError } from "../shared/oci.ts";
-import type { LoadedConfig, LoadedOwner, OwnerType } from "./config.ts";
+import type {
+  LoadedConfig,
+  LoadedGitHubApp,
+  LoadedOwner,
+  OwnerType,
+} from "./config.ts";
+import { log } from "./log.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const appSigningKeys = new WeakMap<LoadedGitHubApp, Promise<CryptoKey>>();
 
 export interface VerifiedOidcIdentity {
   ownerId: number;
@@ -33,18 +41,14 @@ export interface GhcrPackageVersion {
   tags: string[];
 }
 
+export type GhcrPackageClient = ReturnType<typeof openGhcrPackage>;
+
 export class GhcrAuthUnavailableError extends Error {}
 
-export function extractBearerToken(
+export const extractBearerToken = (
   header: string | undefined | null,
-): string | null {
-  if (!header?.startsWith("Bearer ")) {
-    return null;
-  }
-  const token = header.slice(7).trim();
-
-  return token || null;
-}
+): string | null =>
+  header?.startsWith("Bearer ") ? header.slice(7).trim() || null : null;
 
 const base64UrlEncode = (bytes: Uint8Array): string =>
   bytesToBase64(bytes)
@@ -73,7 +77,7 @@ function encodeDerLength(len: number): Uint8Array {
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
-  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  const out = new Uint8Array(parts.reduce((sum, p) => sum + p.length, 0));
   let offset = 0;
   for (const part of parts) {
     out.set(part, offset);
@@ -94,17 +98,14 @@ function pemToPkcs8Der(pem: string): Uint8Array {
     return der;
   }
 
-  const version = new Uint8Array([0x02, 0x01, 0x00]);
-  const algorithmId = new Uint8Array([
-    0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
-    0x01, 0x05, 0x00,
-  ]);
-  const octetString = concatBytes(
-    new Uint8Array([0x04]),
+  const body = concatBytes(
+    new Uint8Array([
+      0x02, 0x01, 0x00, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7,
+      0x0d, 0x01, 0x01, 0x01, 0x05, 0x00, 0x04,
+    ]),
     encodeDerLength(der.length),
     der,
   );
-  const body = concatBytes(version, algorithmId, octetString);
 
   return concatBytes(
     new Uint8Array([0x30]),
@@ -189,10 +190,10 @@ export async function verifyOidcToken(
       `OIDC JWKS request to ${jwksUrl} failed with status ${jwksRes.status}`,
     );
   }
-  const jwks = await jwksRes.json<{
+  const { keys } = await jwksRes.json<{
     keys: (JsonWebKey & { kid?: string })[];
   }>();
-  const jwk = jwks.keys.find((key) => key.kid === header.kid);
+  const jwk = keys.find((key) => key.kid === header.kid);
   if (!jwk) {
     throw new Error(`no OIDC JWK found for kid '${header.kid}'`);
   }
@@ -265,9 +266,6 @@ const isDownloadThresholdRejection = (status: number, body: string): boolean =>
   (status === 400 || status === 403 || status === 422) &&
   /5,?000|public package/i.test(body);
 
-const readBody = (response: Response): Promise<string> =>
-  response.text().catch(() => "");
-
 const githubApiRequest = (
   method: string,
   url: string,
@@ -283,79 +281,56 @@ const githubApiRequest = (
     },
   });
 
-export class GitHubAppClient {
-  readonly #appId: number;
-  readonly #privateKeyPem: string;
-  readonly #apiUrl: string;
-  #signingKey: Promise<CryptoKey> | null = null;
-
-  constructor(appId: number, privateKeyPem: string, apiUrl: string) {
-    this.#appId = appId;
-    this.#privateKeyPem = privateKeyPem;
-    this.#apiUrl = apiUrl.replace(/\/+$/, "");
-  }
-
-  async #getSigningKey(): Promise<CryptoKey> {
-    this.#signingKey ??= crypto.subtle.importKey(
+function getAppSigningKey(app: LoadedGitHubApp): Promise<CryptoKey> {
+  let key = appSigningKeys.get(app);
+  if (!key) {
+    key = crypto.subtle.importKey(
       "pkcs8",
-      pemToPkcs8Der(this.#privateKeyPem),
+      pemToPkcs8Der(app.privateKeyPem),
       { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
       false,
       ["sign"],
     );
-
-    return this.#signingKey;
+    appSigningKeys.set(app, key);
   }
 
-  public async installationToken(installationId: number): Promise<string> {
-    const now = unixNow();
-    const header = base64UrlEncode(
-      encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })),
-    );
-    const payload = base64UrlEncode(
-      encoder.encode(
-        JSON.stringify({
-          iat: now - 60,
-          exp: now + 540,
-          iss: String(this.#appId),
-        }),
-      ),
-    );
-    const signingInput = `${header}.${payload}`;
-    const sig = new Uint8Array(
-      await crypto.subtle.sign(
-        "RSASSA-PKCS1-v1_5",
-        await this.#getSigningKey(),
-        encoder.encode(signingInput),
-      ),
-    );
-
-    const url = `${this.#apiUrl}/app/installations/${installationId}/access_tokens`;
-    const response = await githubApiRequest(
-      "POST",
-      url,
-      `${signingInput}.${base64UrlEncode(sig)}`,
-    );
-    if (!response.ok) {
-      throw new Error(
-        `GitHub installation token request for installation ${installationId} failed (${response.status}): ${await readBody(response)}`,
-      );
-    }
-
-    return (await response.json<{ token: string }>()).token;
-  }
+  return key;
 }
 
-export const createGitHubAppClient = (
-  config: LoadedConfig,
-): GitHubAppClient | null =>
-  config.githubApp
-    ? new GitHubAppClient(
-        config.githubApp.appId,
-        config.githubApp.privateKeyPem,
-        config.githubApiUrl,
-      )
-    : null;
+export async function mintInstallationToken(
+  app: LoadedGitHubApp,
+  apiUrl: string,
+  installationId: number,
+): Promise<string> {
+  const now = unixNow();
+  const signingInput = [
+    { alg: "RS256", typ: "JWT" },
+    { iat: now - 60, exp: now + 540, iss: String(app.appId) },
+  ]
+    .map((part) => base64UrlEncode(encoder.encode(JSON.stringify(part))))
+    .join(".");
+  const sig = new Uint8Array(
+    await crypto.subtle.sign(
+      "RSASSA-PKCS1-v1_5",
+      await getAppSigningKey(app),
+      encoder.encode(signingInput),
+    ),
+  );
+
+  const url = `${stripTrailingSlash(apiUrl)}/app/installations/${installationId}/access_tokens`;
+  const response = await githubApiRequest(
+    "POST",
+    url,
+    `${signingInput}.${base64UrlEncode(sig)}`,
+  );
+  if (!response.ok) {
+    throw new Error(
+      `GitHub installation token request for installation ${installationId} failed (${response.status}): ${await readBody(response)}`,
+    );
+  }
+
+  return (await response.json<{ token: string }>()).token;
+}
 
 export async function exchangeInstallationGhcrToken(
   config: LoadedConfig,
@@ -364,8 +339,7 @@ export async function exchangeInstallationGhcrToken(
   repository: string,
   scopeAction: "pull" | "pull,push",
 ): Promise<string> {
-  const app = createGitHubAppClient(config);
-  if (!app) {
+  if (!config.githubApp) {
     throw new GhcrAuthUnavailableError(
       "GitHub App is not configured for GHCR token exchange",
     );
@@ -376,7 +350,11 @@ export async function exchangeInstallationGhcrToken(
     );
   }
 
-  const installToken = await app.installationToken(owner.githubInstallationId);
+  const installToken = await mintInstallationToken(
+    config.githubApp,
+    config.githubApiUrl,
+    owner.githubInstallationId,
+  );
 
   return oci.exchangeToken(repository, scopeAction, [
     "x-access-token",
@@ -413,25 +391,40 @@ export async function acquirePullToken(
   }
 }
 
-export class GitHubPackagesClient {
-  readonly #apiUrl: string;
-
-  constructor(apiUrl: string) {
-    this.#apiUrl = apiUrl.replace(/\/+$/, "");
+async function classifyDelete(
+  response: Response,
+  targetLabel: string,
+): Promise<{ outcome?: DeleteOutcome; body: string }> {
+  if (response.ok) {
+    return { outcome: { kind: "deleted" }, body: "" };
+  }
+  const body = await readBody(response);
+  if (response.status === 404) {
+    return { outcome: { kind: "not_found", reason: body }, body };
+  }
+  if (isDownloadThresholdRejection(response.status, body)) {
+    return { outcome: { kind: "blocked", reason: body }, body };
+  }
+  if (response.status === 400 && body.toLowerCase().includes("last version")) {
+    return { body };
   }
 
-  #packageUrl(owner: string, ownerType: OwnerType, pkg: string): string {
-    return `${this.#apiUrl}/${ownerType === "org" ? "orgs" : "users"}/${owner}/packages/container/${encodeURIComponent(pkg)}`;
-  }
+  throw new Error(
+    `failed to delete ${targetLabel} (${response.status}): ${body}`,
+  );
+}
 
-  public async listGhcrPackageVersionsPage(
-    owner: string,
-    ownerType: OwnerType,
-    token: string,
-    pkg: string,
-    page: number,
-  ): Promise<{ versions: GhcrPackageVersion[]; notFound: boolean }> {
-    const url = `${this.#packageUrl(owner, ownerType, pkg)}/versions?per_page=100&page=${page}`;
+export function openGhcrPackage(
+  apiUrl: string,
+  owner: string,
+  ownerType: OwnerType,
+  token: string,
+  pkg: string,
+) {
+  const packageUrl = `${stripTrailingSlash(apiUrl)}/${ownerType === "org" ? "orgs" : "users"}/${owner}/packages/container/${encodeURIComponent(pkg)}`;
+
+  async function listPage(page: number) {
+    const url = `${packageUrl}/versions?per_page=100&page=${page}`;
     const response = await githubApiRequest("GET", url, token);
     if (response.status === 404) {
       return { versions: [], notFound: true };
@@ -455,8 +448,7 @@ export class GitHubPackagesClient {
     return {
       notFound: false,
       versions: items.map((item) => {
-        const ts = item.updated_at ?? item.created_at;
-        const parsedMs = ts ? Date.parse(ts) : Number.NaN;
+        const parsedMs = Date.parse(item.updated_at ?? item.created_at ?? "");
 
         return {
           id: item.id,
@@ -470,137 +462,85 @@ export class GitHubPackagesClient {
     };
   }
 
-  public async listGhcrPackageVersions(
-    owner: string,
-    ownerType: OwnerType,
-    token: string,
-    pkg: string,
-    maxPages: number,
-    targetDigests?: ReadonlySet<string>,
-  ): Promise<{
-    versions: Map<string, number>;
-    requestsUsed: number;
-    complete: boolean;
-  }> {
-    const versions = new Map<string, number>();
-    const remaining = targetDigests ? new Set(targetDigests) : null;
-    let requestsUsed = 0;
+  return {
+    listPage,
 
-    for (let page = 1; page <= maxPages; page++) {
-      const result = await this.listGhcrPackageVersionsPage(
-        owner,
-        ownerType,
-        token,
-        pkg,
-        page,
-      );
-      requestsUsed += 1;
-      if (result.notFound) {
-        return { versions, requestsUsed, complete: true };
+    async listVersions(maxPages: number, targetDigests?: ReadonlySet<string>) {
+      const versions = new Map<string, number>();
+      const remaining = targetDigests ? new Set(targetDigests) : null;
+      let requestsUsed = 0;
+
+      for (let page = 1; page <= maxPages; page++) {
+        const result = await listPage(page);
+        requestsUsed += 1;
+        if (result.notFound) {
+          return { versions, requestsUsed, complete: true };
+        }
+        for (const item of result.versions) {
+          versions.set(item.name, item.id);
+          remaining?.delete(item.name);
+        }
+        if (result.versions.length < 100) {
+          return { versions, requestsUsed, complete: true };
+        }
+        if (remaining?.size === 0) {
+          return { versions, requestsUsed, complete: false };
+        }
       }
-      for (const item of result.versions) {
-        versions.set(item.name, item.id);
-        remaining?.delete(item.name);
-      }
-      if (result.versions.length < 100) {
-        return { versions, requestsUsed, complete: true };
-      }
-      if (remaining?.size === 0) {
-        return { versions, requestsUsed, complete: false };
-      }
-    }
 
-    return { versions, requestsUsed, complete: false };
-  }
+      return { versions, requestsUsed, complete: false };
+    },
 
-  public async ghcrPackageVersionExists(
-    owner: string,
-    ownerType: OwnerType,
-    token: string,
-    pkg: string,
-    versionId: number,
-  ): Promise<boolean> {
-    const url = `${this.#packageUrl(owner, ownerType, pkg)}/versions/${versionId}`;
-    const response = await githubApiRequest("GET", url, token);
-    if (response.status === 404) {
-      return false;
-    }
-    if (response.ok) {
-      return true;
-    }
-
-    throw new Error(
-      `failed to check GHCR version ${versionId} for ${owner}/${pkg} (${response.status}): ${await readBody(response)}`,
-    );
-  }
-
-  async #classifyDelete(
-    response: Response,
-    targetLabel: string,
-  ): Promise<{ outcome?: DeleteOutcome; body: string }> {
-    if (response.ok) {
-      return { outcome: { kind: "deleted" }, body: "" };
-    }
-    const body = await readBody(response);
-    if (response.status === 404) {
-      return { outcome: { kind: "not_found", reason: body }, body };
-    }
-    if (isDownloadThresholdRejection(response.status, body)) {
-      return { outcome: { kind: "blocked", reason: body }, body };
-    }
-    if (
-      response.status === 400 &&
-      body.toLowerCase().includes("last version")
-    ) {
-      return { body };
-    }
-
-    throw new Error(
-      `failed to delete ${targetLabel} (${response.status}): ${body}`,
-    );
-  }
-
-  public async deleteGhcrPackageVersionById(
-    owner: string,
-    ownerType: OwnerType,
-    token: string,
-    pkg: string,
-    versionId: number,
-    manifestDigest: string,
-  ): Promise<{ outcome: DeleteOutcome; requestsUsed: number }> {
-    const packageUrl = this.#packageUrl(owner, ownerType, pkg);
-    const first = await this.#classifyDelete(
-      await githubApiRequest(
-        "DELETE",
+    async exists(versionId: number): Promise<boolean> {
+      const response = await githubApiRequest(
+        "GET",
         `${packageUrl}/versions/${versionId}`,
         token,
-      ),
-      `GHCR version ${versionId} (${manifestDigest}) for ${owner}/${pkg}`,
-    );
-    if (first.outcome) {
-      return { outcome: first.outcome, requestsUsed: 1 };
-    }
-
-    console.log(
-      JSON.stringify({
-        message:
-          "last GHCR version cannot be deleted individually; deleting empty package",
-        owner,
-        package: pkg,
-        manifest: manifestDigest,
-      }),
-    );
-
-    const pkgDelete = await this.#classifyDelete(
-      await githubApiRequest("DELETE", packageUrl, token),
-      `GHCR package ${packageUrl}`,
-    );
-    if (!pkgDelete.outcome) {
-      throw new Error(
-        `failed to delete GHCR package ${packageUrl}: ${pkgDelete.body}`,
       );
-    }
+      if (response.status === 404) {
+        return false;
+      }
+      if (response.ok) {
+        return true;
+      }
 
-    return { outcome: pkgDelete.outcome, requestsUsed: 2 };
-  }
+      throw new Error(
+        `failed to check GHCR version ${versionId} for ${owner}/${pkg} (${response.status}): ${await readBody(response)}`,
+      );
+    },
+
+    async deleteVersion(
+      versionId: number,
+      manifestDigest: string,
+    ): Promise<{ outcome: DeleteOutcome; requestsUsed: number }> {
+      const first = await classifyDelete(
+        await githubApiRequest(
+          "DELETE",
+          `${packageUrl}/versions/${versionId}`,
+          token,
+        ),
+        `GHCR version ${versionId} (${manifestDigest}) for ${owner}/${pkg}`,
+      );
+      if (first.outcome) {
+        return { outcome: first.outcome, requestsUsed: 1 };
+      }
+
+      log.info(
+        "last GHCR version cannot be deleted individually; deleting empty package",
+        { owner, package: pkg, manifest: manifestDigest },
+      );
+
+      const pkgDelete = await classifyDelete(
+        await githubApiRequest("DELETE", packageUrl, token),
+        `GHCR package ${packageUrl}`,
+      );
+      if (!pkgDelete.outcome) {
+        throw new Error(
+          `failed to delete GHCR package ${packageUrl}: ${pkgDelete.body}`,
+        );
+      }
+
+      return { outcome: pkgDelete.outcome, requestsUsed: 2 };
+    },
+  };
 }

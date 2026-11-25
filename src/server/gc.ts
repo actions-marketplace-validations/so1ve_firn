@@ -2,7 +2,7 @@ import { errorMessage } from "../shared/format.ts";
 import { unixNow } from "../shared/nix-format.ts";
 import type { GcReport } from "../shared/protocol.ts";
 import type { LoadedConfig, LoadedOwner } from "./config.ts";
-import type { BlobRecord, SqlDatabase } from "./db.ts";
+import type { SqlDatabase } from "./db.ts";
 import {
   cacheBlobVersionIds,
   deleteBlobIfUnreferenced,
@@ -12,8 +12,9 @@ import {
   listUnreferencedBlobs,
   markBlobGcBlocked,
 } from "./db.ts";
-import type { GhcrPackageVersion } from "./github.ts";
-import { GitHubPackagesClient, createGitHubAppClient } from "./github.ts";
+import type { GhcrPackageClient, GhcrPackageVersion } from "./github.ts";
+import { mintInstallationToken, openGhcrPackage } from "./github.ts";
+import { log } from "./log.ts";
 
 const SECONDS_PER_DAY = 86_400;
 const ORPHAN_GRACE_SECONDS = 3600;
@@ -23,20 +24,434 @@ const isFirnNarVersion = (version: GhcrPackageVersion): boolean =>
   version.tags.length > 0 &&
   version.tags.every((tag) => tag.startsWith("nar-"));
 
-function groupBlobsByPackage(
-  blobs: readonly BlobRecord[],
-): Map<string, BlobRecord[]> {
-  const byPackage = new Map<string, BlobRecord[]>();
-  for (const blob of blobs) {
-    const list = byPackage.get(blob.ghcrPackage);
-    if (list) {
-      list.push(blob);
-    } else {
-      byPackage.set(blob.ghcrPackage, [blob]);
+interface GcState {
+  db: SqlDatabase;
+  config: LoadedConfig;
+  report: GcReport;
+  tokens: Map<string, string>;
+  failedTokenOwners: Set<string>;
+  subrequests: number;
+  orphansDeleted: number;
+}
+
+interface DeleteTarget {
+  versionId: number;
+  manifestDigest: string;
+  blobId?: number;
+}
+
+const hasBudget = (state: GcState, needed: number): boolean =>
+  state.subrequests + needed <= state.config.gc.maxSubrequests;
+
+const canAccessOwner = (state: GcState, owner: LoadedOwner): boolean =>
+  Boolean(
+    state.config.githubPackagesToken ||
+    (state.config.githubApp && owner.githubInstallationId !== null),
+  );
+
+function recordError(state: GcState, message: string, count = 1): void {
+  state.report.blob_errors += count;
+  state.report.last_error ??= message;
+}
+
+async function acquireOwnerToken(
+  state: GcState,
+  owner: LoadedOwner,
+  extraBudget: number,
+): Promise<
+  { status: "ok"; token: string } | { status: "skip" } | { status: "error" }
+> {
+  const { githubPackagesToken, githubApp, githubApiUrl } = state.config;
+  const cached = githubPackagesToken ?? state.tokens.get(owner.name);
+  const minNeeded = (cached ? 0 : 1) + extraBudget;
+  if (!canAccessOwner(state, owner) || !hasBudget(state, minNeeded)) {
+    return { status: "skip" };
+  }
+  if (cached) {
+    return { status: "ok", token: cached };
+  }
+  if (
+    !githubApp ||
+    owner.githubInstallationId === null ||
+    state.failedTokenOwners.has(owner.name)
+  ) {
+    return { status: "error" };
+  }
+
+  try {
+    const token = await mintInstallationToken(
+      githubApp,
+      githubApiUrl,
+      owner.githubInstallationId,
+    );
+    state.subrequests += 1;
+    state.tokens.set(owner.name, token);
+
+    return { status: "ok", token };
+  } catch (error) {
+    state.failedTokenOwners.add(owner.name);
+    const detail = errorMessage(error);
+    state.report.last_error ??= detail;
+    log.error("failed to mint GitHub App installation token for GC", {
+      owner: owner.name,
+      error: detail,
+    });
+
+    return { status: "error" };
+  }
+}
+
+async function deleteVersion(
+  state: GcState,
+  pkgClient: GhcrPackageClient,
+  ownerName: string,
+  pkg: string,
+  target: DeleteTarget,
+  justListed: boolean,
+): Promise<"deleted" | "handled" | "abort_package"> {
+  const { versionId, manifestDigest, blobId } = target;
+  try {
+    const { outcome, requestsUsed } = await pkgClient.deleteVersion(
+      versionId,
+      manifestDigest,
+    );
+    state.subrequests += requestsUsed;
+
+    if (outcome.kind === "deleted") {
+      if (blobId === undefined) {
+        state.report.blobs_deleted += 1;
+        state.orphansDeleted += 1;
+      } else if (await deleteBlobIfUnreferenced(state.db, blobId)) {
+        state.report.blobs_deleted += 1;
+      }
+
+      return "deleted";
+    }
+
+    if (outcome.kind === "not_found") {
+      let stillExists = justListed;
+      if (!justListed && hasBudget(state, 1)) {
+        stillExists = await pkgClient.exists(versionId);
+        state.subrequests += 1;
+      }
+      if (!stillExists && blobId !== undefined) {
+        if (await deleteBlobIfUnreferenced(state.db, blobId)) {
+          state.report.blobs_deleted += 1;
+        }
+
+        return "deleted";
+      }
+
+      const detail = `GHCR returned 404 deleting existing version ${versionId} in ${ownerName}/${pkg} (${outcome.reason || "check GitHub App Packages write permission and repository access"})`;
+      recordError(state, detail);
+      log.error(detail, {
+        owner: ownerName,
+        package: pkg,
+        version_id: versionId,
+        manifest: manifestDigest,
+      });
+
+      return "abort_package";
+    }
+
+    if (blobId !== undefined) {
+      await markBlobGcBlocked(state.db, blobId, outcome.reason);
+    }
+    state.report.blobs_blocked += 1;
+    log.warn("GHCR refused deletion permanently", {
+      owner: ownerName,
+      package: pkg,
+      manifest: manifestDigest,
+      reason: outcome.reason,
+    });
+
+    return "handled";
+  } catch (error) {
+    state.subrequests += 1;
+    const detail = errorMessage(error);
+    recordError(state, detail);
+    log.error("failed to delete GHCR package version", {
+      owner: ownerName,
+      package: pkg,
+      manifest: manifestDigest,
+      error: detail,
+    });
+
+    return "handled";
+  }
+}
+
+async function deleteBatch(
+  state: GcState,
+  pkgClient: GhcrPackageClient,
+  ownerName: string,
+  pkg: string,
+  targets: readonly DeleteTarget[],
+  justListed: boolean,
+): Promise<{ deleted: number; aborted: boolean; budgetExhausted: boolean }> {
+  let deleted = 0;
+  for (const [i, target] of targets.entries()) {
+    if (!hasBudget(state, DELETE_SUBREQUEST_RESERVE)) {
+      state.report.blobs_skipped += targets.length - i;
+
+      return { deleted, aborted: false, budgetExhausted: true };
+    }
+    const res = await deleteVersion(
+      state,
+      pkgClient,
+      ownerName,
+      pkg,
+      target,
+      justListed,
+    );
+    if (res === "abort_package") {
+      return { deleted, aborted: true, budgetExhausted: false };
+    }
+    if (res === "deleted") {
+      deleted += 1;
     }
   }
 
-  return byPackage;
+  return { deleted, aborted: false, budgetExhausted: false };
+}
+
+async function gcUnreferencedBlobs(
+  state: GcState,
+  owners: readonly LoadedOwner[],
+): Promise<void> {
+  for (const owner of owners) {
+    const unreferenced = await listUnreferencedBlobs(state.db, owner.name);
+    if (unreferenced.length === 0) {
+      continue;
+    }
+
+    const auth = await acquireOwnerToken(
+      state,
+      owner,
+      DELETE_SUBREQUEST_RESERVE,
+    );
+    if (auth.status !== "ok") {
+      if (auth.status === "skip") {
+        state.report.blobs_skipped += unreferenced.length;
+      } else {
+        state.report.blob_errors += unreferenced.length;
+      }
+
+      continue;
+    }
+
+    const ghcrOwner = owner.name.toLowerCase();
+    for (const [pkg, pkgBlobs] of Map.groupBy(
+      unreferenced,
+      (b) => b.ghcrPackage,
+    )) {
+      const pkgClient = openGhcrPackage(
+        state.config.githubApiUrl,
+        ghcrOwner,
+        owner.ownerType,
+        auth.token,
+        pkg,
+      );
+      const knownTargets: DeleteTarget[] = [];
+      const unknownBlobs = [];
+      for (const blob of pkgBlobs) {
+        if (blob.ghcrVersionId === null) {
+          unknownBlobs.push(blob);
+        } else {
+          knownTargets.push({
+            versionId: blob.ghcrVersionId,
+            manifestDigest: blob.manifestDigest,
+            blobId: blob.id,
+          });
+        }
+      }
+
+      const knownResult = await deleteBatch(
+        state,
+        pkgClient,
+        owner.name,
+        pkg,
+        knownTargets,
+        false,
+      );
+      if (knownResult.aborted || unknownBlobs.length === 0) {
+        continue;
+      }
+
+      const maxListPages =
+        state.config.gc.maxSubrequests -
+        state.subrequests -
+        DELETE_SUBREQUEST_RESERVE;
+      if (maxListPages < 1) {
+        state.report.blobs_skipped += unknownBlobs.length;
+
+        continue;
+      }
+
+      let listed: Awaited<ReturnType<GhcrPackageClient["listVersions"]>>;
+      try {
+        listed = await pkgClient.listVersions(
+          maxListPages,
+          new Set(unknownBlobs.map((b) => b.manifestDigest)),
+        );
+        state.subrequests += listed.requestsUsed;
+      } catch (error) {
+        const detail = errorMessage(error);
+        recordError(state, detail, unknownBlobs.length);
+        log.error("failed to list GHCR package versions for GC", {
+          owner: owner.name,
+          package: pkg,
+          error: detail,
+        });
+
+        continue;
+      }
+
+      await cacheBlobVersionIds(state.db, owner.name, pkg, listed.versions);
+
+      const resolvedTargets: DeleteTarget[] = [];
+      for (const blob of unknownBlobs) {
+        const versionId = listed.versions.get(blob.manifestDigest);
+        if (versionId !== undefined) {
+          resolvedTargets.push({
+            versionId,
+            manifestDigest: blob.manifestDigest,
+            blobId: blob.id,
+          });
+        } else if (!listed.complete) {
+          state.report.blobs_skipped += 1;
+        } else if (await deleteBlobIfUnreferenced(state.db, blob.id)) {
+          state.report.blobs_deleted += 1;
+        }
+      }
+
+      await deleteBatch(
+        state,
+        pkgClient,
+        owner.name,
+        pkg,
+        resolvedTargets,
+        true,
+      );
+    }
+  }
+}
+
+async function sweepOrphanManifests(
+  state: GcState,
+  owners: readonly LoadedOwner[],
+  orphanCutoff: number,
+): Promise<void> {
+  let budgetExhausted = false;
+
+  for (const owner of owners) {
+    if (!canAccessOwner(state, owner)) {
+      continue;
+    }
+    const knownByPackage = await listKnownManifestsByPackage(
+      state.db,
+      owner.name,
+    );
+    if (knownByPackage.size === 0) {
+      continue;
+    }
+
+    const auth = await acquireOwnerToken(
+      state,
+      owner,
+      1 + DELETE_SUBREQUEST_RESERVE,
+    );
+    if (auth.status === "skip") {
+      budgetExhausted = true;
+
+      break;
+    }
+    if (auth.status === "error") {
+      state.report.blob_errors += 1;
+
+      continue;
+    }
+
+    const ghcrOwner = owner.name.toLowerCase();
+    for (const [pkg, knownManifests] of knownByPackage) {
+      const pkgClient = openGhcrPackage(
+        state.config.githubApiUrl,
+        ghcrOwner,
+        owner.ownerType,
+        auth.token,
+        pkg,
+      );
+      for (let page = 1; ;) {
+        if (!hasBudget(state, 1 + DELETE_SUBREQUEST_RESERVE)) {
+          budgetExhausted = true;
+
+          break;
+        }
+
+        let pageResult: Awaited<ReturnType<GhcrPackageClient["listPage"]>>;
+        try {
+          pageResult = await pkgClient.listPage(page);
+          state.subrequests += 1;
+        } catch (error) {
+          state.subrequests += 1;
+          const detail = errorMessage(error);
+          recordError(state, detail);
+          log.error("failed to list GHCR versions during orphan sweep", {
+            owner: owner.name,
+            package: pkg,
+            page,
+            error: detail,
+          });
+
+          break;
+        }
+
+        if (pageResult.notFound || pageResult.versions.length === 0) {
+          break;
+        }
+
+        const orphans: DeleteTarget[] = pageResult.versions
+          .filter(
+            (v) =>
+              !knownManifests.has(v.name) &&
+              isFirnNarVersion(v) &&
+              v.updatedAt !== null &&
+              v.updatedAt <= orphanCutoff,
+          )
+          .map((v) => ({ versionId: v.id, manifestDigest: v.name }));
+
+        const result = await deleteBatch(
+          state,
+          pkgClient,
+          owner.name,
+          pkg,
+          orphans,
+          true,
+        );
+        budgetExhausted = result.budgetExhausted;
+        if (
+          budgetExhausted ||
+          result.aborted ||
+          pageResult.versions.length < 100
+        ) {
+          break;
+        }
+        if (result.deleted === 0) {
+          page += 1;
+        }
+      }
+      if (budgetExhausted) {
+        break;
+      }
+    }
+    if (budgetExhausted) {
+      break;
+    }
+  }
+
+  if (budgetExhausted && state.report.blobs_skipped === 0) {
+    state.report.blobs_skipped += 1;
+  }
 }
 
 export async function runGc(
@@ -45,8 +460,6 @@ export async function runGc(
   dryRun: boolean,
 ): Promise<GcReport> {
   const now = unixNow();
-  const orphanCutoff = now - ORPHAN_GRACE_SECONDS;
-
   const report: GcReport = {
     pr_paths_removed: await evictExpiredPrScopes(
       db,
@@ -64,444 +477,36 @@ export async function runGc(
     blob_errors: 0,
   };
 
-  const githubApp = createGitHubAppClient(config);
-  const packagesToken = config.githubPackagesToken;
+  const state: GcState = {
+    db,
+    config,
+    report,
+    tokens: new Map(),
+    failedTokenOwners: new Set(),
+    subrequests: 0,
+    orphansDeleted: 0,
+  };
   const owners = [...config.ownersByName.values()];
-  let subrequests = 0;
-  let orphansDeleted = 0;
 
-  if ((!githubApp && !packagesToken) || dryRun) {
+  if ((!config.githubApp && !config.githubPackagesToken) || dryRun) {
     for (const owner of owners) {
       report.blobs_skipped += (
         await listUnreferencedBlobs(db, owner.name)
       ).length;
     }
   } else {
-    const packages = new GitHubPackagesClient(config.githubApiUrl);
-    const maxSubrequests = config.gc.maxSubrequests;
-    const tokens = new Map<string, string>();
-    const failedTokenOwners = new Set<string>();
-
-    const hasBudget = (needed: number) =>
-      subrequests + needed <= maxSubrequests;
-    const canAccessOwner = (owner: LoadedOwner) =>
-      Boolean(
-        packagesToken || (githubApp && owner.githubInstallationId !== null),
-      );
-    const needsTokenMint = (ownerName: string) =>
-      !packagesToken && !tokens.has(ownerName);
-    function recordError(message: string, count = 1) {
-      report.blob_errors += count;
-      report.last_error ??= message;
-    }
-
-    async function getOwnerToken(owner: LoadedOwner): Promise<string | null> {
-      if (packagesToken) {
-        return packagesToken;
-      }
-      const cached = tokens.get(owner.name);
-      if (cached) {
-        return cached;
-      }
-      if (
-        !githubApp ||
-        owner.githubInstallationId === null ||
-        failedTokenOwners.has(owner.name)
-      ) {
-        return null;
-      }
-
-      try {
-        const token = await githubApp.installationToken(
-          owner.githubInstallationId,
-        );
-        subrequests += 1;
-        tokens.set(owner.name, token);
-
-        return token;
-      } catch (error) {
-        failedTokenOwners.add(owner.name);
-        const detail = errorMessage(error);
-        report.last_error ??= detail;
-        console.error(
-          JSON.stringify({
-            message: "failed to mint GitHub App installation token for GC",
-            owner: owner.name,
-            error: detail,
-          }),
-        );
-
-        return null;
-      }
-    }
-
-    async function deleteVersion(
-      owner: LoadedOwner,
-      token: string,
-      pkg: string,
-      versionId: number,
-      manifestDigest: string,
-      options: { blobId?: number; justListed: boolean },
-    ): Promise<"deleted" | "handled" | "abort_package"> {
-      const ghcrOwner = owner.name.toLowerCase();
-      try {
-        const { outcome, requestsUsed } =
-          await packages.deleteGhcrPackageVersionById(
-            ghcrOwner,
-            owner.ownerType,
-            token,
-            pkg,
-            versionId,
-            manifestDigest,
-          );
-        subrequests += requestsUsed;
-
-        if (outcome.kind === "deleted") {
-          if (options.blobId === undefined) {
-            report.blobs_deleted += 1;
-            orphansDeleted += 1;
-          } else if (await deleteBlobIfUnreferenced(db, options.blobId)) {
-            report.blobs_deleted += 1;
-          }
-
-          return "deleted";
-        }
-
-        if (outcome.kind === "not_found") {
-          let stillExists = options.justListed;
-          if (!options.justListed && hasBudget(1)) {
-            stillExists = await packages.ghcrPackageVersionExists(
-              ghcrOwner,
-              owner.ownerType,
-              token,
-              pkg,
-              versionId,
-            );
-            subrequests += 1;
-          }
-          if (!stillExists && options.blobId !== undefined) {
-            if (await deleteBlobIfUnreferenced(db, options.blobId)) {
-              report.blobs_deleted += 1;
-            }
-
-            return "deleted";
-          }
-
-          const detail = `GHCR returned 404 deleting existing version ${versionId} in ${owner.name}/${pkg} (${outcome.reason || "check GitHub App Packages write permission and repository access"})`;
-          recordError(detail);
-          console.error(
-            JSON.stringify({
-              message: detail,
-              owner: owner.name,
-              package: pkg,
-              version_id: versionId,
-              manifest: manifestDigest,
-            }),
-          );
-
-          return "abort_package";
-        }
-
-        if (options.blobId !== undefined) {
-          await markBlobGcBlocked(db, options.blobId, outcome.reason);
-        }
-        report.blobs_blocked += 1;
-        console.warn(
-          JSON.stringify({
-            message: "GHCR refused deletion permanently",
-            owner: owner.name,
-            package: pkg,
-            manifest: manifestDigest,
-            reason: outcome.reason,
-          }),
-        );
-
-        return "handled";
-      } catch (error) {
-        subrequests += 1;
-        const detail = errorMessage(error);
-        recordError(detail);
-        console.error(
-          JSON.stringify({
-            message: "failed to delete GHCR package version",
-            owner: owner.name,
-            package: pkg,
-            manifest: manifestDigest,
-            error: detail,
-          }),
-        );
-
-        return "handled";
-      }
-    }
-
-    // Phase 1: Delete unreferenced blobs tracked in the database.
-    for (const owner of owners) {
-      const unreferenced = await listUnreferencedBlobs(db, owner.name);
-      if (unreferenced.length === 0) {
-        continue;
-      }
-
-      const minNeeded =
-        (needsTokenMint(owner.name) ? 1 : 0) + DELETE_SUBREQUEST_RESERVE;
-      if (!canAccessOwner(owner) || !hasBudget(minNeeded)) {
-        report.blobs_skipped += unreferenced.length;
-
-        continue;
-      }
-
-      const token = await getOwnerToken(owner);
-      if (!token) {
-        report.blob_errors += unreferenced.length;
-
-        continue;
-      }
-
-      const ghcrOwner = owner.name.toLowerCase();
-      for (const [pkg, pkgBlobs] of groupBlobsByPackage(unreferenced)) {
-        const knownBlobs = pkgBlobs.filter((b) => b.ghcrVersionId !== null);
-        const unknownBlobs = pkgBlobs.filter((b) => b.ghcrVersionId === null);
-
-        let aborted = false;
-        for (const blob of knownBlobs) {
-          if (!hasBudget(DELETE_SUBREQUEST_RESERVE)) {
-            report.blobs_skipped += 1;
-
-            continue;
-          }
-          const res = await deleteVersion(
-            owner,
-            token,
-            pkg,
-            blob.ghcrVersionId!,
-            blob.manifestDigest,
-            { blobId: blob.id, justListed: false },
-          );
-          if (res === "abort_package") {
-            aborted = true;
-
-            break;
-          }
-        }
-        if (aborted || unknownBlobs.length === 0) {
-          continue;
-        }
-
-        const maxListPages =
-          maxSubrequests - subrequests - DELETE_SUBREQUEST_RESERVE;
-        if (maxListPages < 1) {
-          report.blobs_skipped += unknownBlobs.length;
-
-          continue;
-        }
-
-        let listed: Awaited<
-          ReturnType<GitHubPackagesClient["listGhcrPackageVersions"]>
-        >;
-        try {
-          listed = await packages.listGhcrPackageVersions(
-            ghcrOwner,
-            owner.ownerType,
-            token,
-            pkg,
-            maxListPages,
-            new Set(unknownBlobs.map((b) => b.manifestDigest)),
-          );
-          subrequests += listed.requestsUsed;
-        } catch (error) {
-          const detail = errorMessage(error);
-          recordError(detail, unknownBlobs.length);
-          console.error(
-            JSON.stringify({
-              message: "failed to list GHCR package versions for GC",
-              owner: owner.name,
-              package: pkg,
-              error: detail,
-            }),
-          );
-
-          continue;
-        }
-
-        await cacheBlobVersionIds(db, owner.name, pkg, listed.versions);
-
-        for (const blob of unknownBlobs) {
-          const versionId = listed.versions.get(blob.manifestDigest);
-          if (versionId === undefined) {
-            if (!listed.complete) {
-              report.blobs_skipped += 1;
-            } else if (await deleteBlobIfUnreferenced(db, blob.id)) {
-              report.blobs_deleted += 1;
-            }
-
-            continue;
-          }
-          if (!hasBudget(DELETE_SUBREQUEST_RESERVE)) {
-            report.blobs_skipped += 1;
-
-            continue;
-          }
-          const res = await deleteVersion(
-            owner,
-            token,
-            pkg,
-            versionId,
-            blob.manifestDigest,
-            { blobId: blob.id, justListed: true },
-          );
-          if (res === "abort_package") {
-            break;
-          }
-        }
-      }
-    }
-
-    // Phase 2: Sweep aged, untracked Firn nar-* manifests left on GHCR by failed commits.
+    await gcUnreferencedBlobs(state, owners);
     if (report.blobs_skipped === 0) {
-      let budgetExhausted = false;
-
-      for (const owner of owners) {
-        if (!canAccessOwner(owner)) {
-          continue;
-        }
-        const knownByPackage = await listKnownManifestsByPackage(
-          db,
-          owner.name,
-        );
-        if (knownByPackage.size === 0) {
-          continue;
-        }
-
-        const minNeeded =
-          (needsTokenMint(owner.name) ? 1 : 0) + 1 + DELETE_SUBREQUEST_RESERVE;
-        if (!hasBudget(minNeeded)) {
-          budgetExhausted = true;
-
-          break;
-        }
-
-        const token = await getOwnerToken(owner);
-        if (!token) {
-          report.blob_errors += 1;
-
-          continue;
-        }
-
-        const ghcrOwner = owner.name.toLowerCase();
-        for (const [pkg, knownManifests] of knownByPackage) {
-          for (let page = 1; ;) {
-            if (!hasBudget(1 + DELETE_SUBREQUEST_RESERVE)) {
-              budgetExhausted = true;
-
-              break;
-            }
-
-            let pageResult: {
-              versions: GhcrPackageVersion[];
-              notFound: boolean;
-            };
-            try {
-              pageResult = await packages.listGhcrPackageVersionsPage(
-                ghcrOwner,
-                owner.ownerType,
-                token,
-                pkg,
-                page,
-              );
-              subrequests += 1;
-            } catch (error) {
-              subrequests += 1;
-              const detail = errorMessage(error);
-              recordError(detail);
-              console.error(
-                JSON.stringify({
-                  message: "failed to list GHCR versions during orphan sweep",
-                  owner: owner.name,
-                  package: pkg,
-                  page,
-                  error: detail,
-                }),
-              );
-
-              break;
-            }
-
-            if (pageResult.notFound || pageResult.versions.length === 0) {
-              break;
-            }
-
-            const orphans = pageResult.versions.filter(
-              (v) =>
-                !knownManifests.has(v.name) &&
-                isFirnNarVersion(v) &&
-                v.updatedAt !== null &&
-                v.updatedAt <= orphanCutoff,
-            );
-
-            let deletedOnPage = 0;
-            let packageAborted = false;
-            for (const [i, orphan] of orphans.entries()) {
-              if (!hasBudget(DELETE_SUBREQUEST_RESERVE)) {
-                report.blobs_skipped += orphans.length - i;
-                budgetExhausted = true;
-
-                break;
-              }
-              const res = await deleteVersion(
-                owner,
-                token,
-                pkg,
-                orphan.id,
-                orphan.name,
-                { justListed: true },
-              );
-              if (res === "abort_package") {
-                packageAborted = true;
-
-                break;
-              }
-              if (res === "deleted") {
-                deletedOnPage += 1;
-              }
-            }
-
-            if (
-              budgetExhausted ||
-              packageAborted ||
-              pageResult.versions.length < 100
-            ) {
-              break;
-            }
-            if (deletedOnPage === 0) {
-              page += 1;
-            }
-          }
-
-          if (budgetExhausted) {
-            break;
-          }
-        }
-
-        if (budgetExhausted) {
-          break;
-        }
-      }
-
-      if (budgetExhausted && report.blobs_skipped === 0) {
-        report.blobs_skipped += 1;
-      }
+      await sweepOrphanManifests(state, owners, now - ORPHAN_GRACE_SECONDS);
     }
   }
 
-  console.log(
-    JSON.stringify({
-      message: "garbage collection cycle complete",
-      dry_run: dryRun,
-      subrequests,
-      orphans_deleted: orphansDeleted,
-      ...report,
-    }),
-  );
+  log.info("garbage collection cycle complete", {
+    dry_run: dryRun,
+    subrequests: state.subrequests,
+    orphans_deleted: state.orphansDeleted,
+    ...report,
+  });
 
   return report;
 }

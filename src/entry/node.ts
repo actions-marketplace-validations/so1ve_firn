@@ -12,6 +12,7 @@ import { openLibsql } from "../server/db/libsql.ts";
 import { applyMigrations, openNodeSqlite } from "../server/db/sqlite.ts";
 import type { CloseableSqlDatabase } from "../server/db.ts";
 import { runGc } from "../server/gc.ts";
+import { log } from "../server/log.ts";
 import { errorMessage } from "../shared/format.ts";
 
 const DEFAULT_PUBLIC_DIR = path.resolve(import.meta.dirname, "../../public");
@@ -64,11 +65,10 @@ export function resolveEnvWithFiles(
   return resolved;
 }
 
-export function openConfiguredDatabase(options: DatabaseOptions): {
-  db: CloseableSqlDatabase;
-  storage: string;
-} {
-  const env = resolveEnvWithFiles(options.env ?? process.env);
+function openDatabaseFromResolvedEnv(
+  options: DatabaseOptions,
+  env: Record<string, string | undefined>,
+): { db: CloseableSqlDatabase; storage: string } {
   const libsqlUrl = options.libsqlUrl?.trim() || env.LIBSQL_URL?.trim();
   if (libsqlUrl) {
     return {
@@ -88,7 +88,10 @@ export function openConfiguredDatabase(options: DatabaseOptions): {
 export async function runDatabaseMigrations(
   options: DatabaseOptions,
 ): Promise<{ applied: string[]; storage: string }> {
-  const { db, storage } = openConfiguredDatabase(options);
+  const { db, storage } = openDatabaseFromResolvedEnv(
+    options,
+    resolveEnvWithFiles(options.env ?? process.env),
+  );
   try {
     return { applied: await applyMigrations(db), storage };
   } finally {
@@ -107,13 +110,11 @@ export async function startNodeServer(
     Number.parseInt(env.GC_INTERVAL_MINUTES ?? "30", 10);
 
   const config = await loadConfig(env, { defaultMaxGcSubrequests: 10_000 });
-  const { db, storage } = openConfiguredDatabase({ ...options, env });
+  const { db, storage } = openDatabaseFromResolvedEnv(options, env);
 
   const applied = await applyMigrations(db);
   if (applied.length > 0) {
-    console.log(
-      JSON.stringify({ message: "applied database migrations", applied }),
-    );
+    log.info("applied database migrations", { applied });
   }
 
   const app = new Hono();
@@ -136,12 +137,9 @@ export async function startNodeServer(
       gcInFlight = true;
       void runGc(db, config, false)
         .catch((error: unknown) => {
-          console.error(
-            JSON.stringify({
-              message: "scheduled GC failed",
-              error: errorMessage(error),
-            }),
-          );
+          log.error("scheduled GC failed", {
+            error: errorMessage(error),
+          });
         })
         .finally(() => {
           gcInFlight = false;
@@ -163,16 +161,13 @@ export async function startNodeServer(
   const actualPort =
     typeof address === "object" && address ? address.port : port;
 
-  console.log(
-    JSON.stringify({
-      message: "firn server listening",
-      host,
-      port: actualPort,
-      storage,
-      gc_interval_minutes: gcIntervalMinutes,
-      public_base_url: config.publicBaseUrl,
-    }),
-  );
+  log.info("firn server listening", {
+    host,
+    port: actualPort,
+    storage,
+    gc_interval_minutes: gcIntervalMinutes,
+    public_base_url: config.publicBaseUrl,
+  });
 
   return {
     host,

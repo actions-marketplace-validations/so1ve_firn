@@ -1,3 +1,4 @@
+import { stripTrailingSlash } from "../shared/format.ts";
 import { SigningKeyPair } from "../shared/nix-format.ts";
 
 export type OwnerType = "user" | "org";
@@ -52,24 +53,28 @@ export interface LoadedConfig {
   ownersByGithubId: Map<number, LoadedOwner>;
 }
 
-export interface ServerRuntimeEnv {
-  PUBLIC_BASE_URL?: string;
-  OWNERS_JSON?: string;
-  GC_PR_TTL_DAYS?: string;
-  GC_MAIN_LRU_DAYS?: string;
-  GC_MAX_SUBREQUESTS?: string;
-  GITHUB_APP_ID?: string;
-  MAIN_SIGNING_KEY?: string;
-  PR_SIGNING_KEY?: string;
-  GITHUB_APP_PRIVATE_KEY?: string;
-  GITHUB_PACKAGES_TOKEN?: string;
-  GITHUB_WEBHOOK_SECRET?: string;
-  MANUAL_TOKENS_JSON?: string;
-  ADMIN_TOKEN?: string;
-  GHCR_REGISTRY_URL?: string;
-  GITHUB_API_URL?: string;
-  GITHUB_OIDC_ISSUER?: string;
-}
+const CONFIG_ENV_KEYS = [
+  "PUBLIC_BASE_URL",
+  "OWNERS_JSON",
+  "GC_PR_TTL_DAYS",
+  "GC_MAIN_LRU_DAYS",
+  "GC_MAX_SUBREQUESTS",
+  "GITHUB_APP_ID",
+  "MAIN_SIGNING_KEY",
+  "PR_SIGNING_KEY",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_PACKAGES_TOKEN",
+  "GITHUB_WEBHOOK_SECRET",
+  "MANUAL_TOKENS_JSON",
+  "ADMIN_TOKEN",
+  "GHCR_REGISTRY_URL",
+  "GITHUB_API_URL",
+  "GITHUB_OIDC_ISSUER",
+] as const;
+
+export type ServerRuntimeEnv = Partial<
+  Record<(typeof CONFIG_ENV_KEYS)[number], string>
+>;
 
 export interface LoadConfigOptions {
   defaultMaxGcSubrequests?: number;
@@ -92,9 +97,6 @@ const parseOptionalPositiveInt = (
   raw: string | undefined,
   fallback: number,
 ): number => (raw?.trim() ? parsePositiveInt(raw) : fallback);
-
-const stripTrailingSlash = (url: string): string =>
-  url.trim().replace(/\/+$/, "");
 
 function parseRepoPackages(
   ownerName: string,
@@ -174,30 +176,6 @@ export const isMainRef = (owner: LoadedOwner, refName: string): boolean =>
   owner.mainRefs.includes(refName);
 
 let cachedConfig: { key: string; promise: Promise<LoadedConfig> } | null = null;
-
-const configCacheKey = (
-  env: ServerRuntimeEnv,
-  defaultMaxGcSubrequests: number,
-): string =>
-  JSON.stringify([
-    defaultMaxGcSubrequests,
-    env.PUBLIC_BASE_URL,
-    env.OWNERS_JSON,
-    env.GC_PR_TTL_DAYS,
-    env.GC_MAIN_LRU_DAYS,
-    env.GC_MAX_SUBREQUESTS,
-    env.GITHUB_APP_ID,
-    env.MAIN_SIGNING_KEY,
-    env.PR_SIGNING_KEY,
-    env.GITHUB_APP_PRIVATE_KEY,
-    env.GITHUB_PACKAGES_TOKEN,
-    env.GITHUB_WEBHOOK_SECRET,
-    env.MANUAL_TOKENS_JSON,
-    env.ADMIN_TOKEN,
-    env.GHCR_REGISTRY_URL,
-    env.GITHUB_API_URL,
-    env.GITHUB_OIDC_ISSUER,
-  ]);
 
 async function buildConfig(
   env: ServerRuntimeEnv,
@@ -308,7 +286,10 @@ export function loadConfig(
   options: LoadConfigOptions = {},
 ): Promise<LoadedConfig> {
   const defaultMax = options.defaultMaxGcSubrequests ?? 40;
-  const key = configCacheKey(env, defaultMax);
+  const key = JSON.stringify([
+    defaultMax,
+    ...CONFIG_ENV_KEYS.map((name) => env[name]),
+  ]);
   if (cachedConfig?.key === key) {
     return cachedConfig.promise;
   }

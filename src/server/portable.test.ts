@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import manifest from "../../package.json" with { type: "json" };
 import { resolveEnvWithFiles, startNodeServer } from "../entry/node.ts";
 import { createWebApp } from "../entry/web.ts";
+import { MAIN_SCOPE } from "../shared/format.ts";
 import { SigningKeyPair, unixNow } from "../shared/nix-format.ts";
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
@@ -19,7 +20,6 @@ import {
   openNodeSqlite,
 } from "./db/sqlite.ts";
 import {
-  MAIN_SCOPE,
   cacheBlobVersionIds,
   cacheStats,
   commitEntries,

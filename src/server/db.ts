@@ -8,20 +8,18 @@ import type {
 } from "../shared/protocol.ts";
 import type { LoadedOwner } from "./config.ts";
 
-export { MAIN_SCOPE, prScope };
-
 export const TOUCH_THROTTLE_SECONDS = 86_400;
 
 const SQL_BIND_CHUNK = 80;
 const PR_SCOPE_EXPR = "'pr:' || owner_id || ':' || repo || ':' || pr_number";
+const BLOB_SELECT =
+  "b.id, b.owner_id AS ownerId, b.ghcr_package AS ghcrPackage, b.manifest_digest AS manifestDigest, b.blob_digest AS blobDigest, b.ghcr_version_id AS ghcrVersionId";
 
 export type SqlParam = string | number | null;
-
 export interface SqlStatement {
   sql: string;
   params?: readonly SqlParam[];
 }
-
 export interface SqlRunResult {
   changes: number;
 }
@@ -50,15 +48,10 @@ export function d1Adapter(db: D1Queryable): SqlDatabase {
       prepare(sql, params).first<T>(),
     all: async <T>(sql: string, params?: readonly SqlParam[]): Promise<T[]> =>
       (await prepare(sql, params).all<T>()).results,
-    run: async (
-      sql: string,
-      params?: readonly SqlParam[],
-    ): Promise<SqlRunResult> => ({
+    run: async (sql: string, params?: readonly SqlParam[]) => ({
       changes: (await prepare(sql, params).run()).meta.changes ?? 0,
     }),
-    async batch(
-      statements: readonly SqlStatement[],
-    ): Promise<readonly SqlRunResult[]> {
+    async batch(statements: readonly SqlStatement[]) {
       if (statements.length === 0) {
         return [];
       }
@@ -119,24 +112,6 @@ export interface CacheStats {
   activePrs: number;
 }
 
-interface BlobRow {
-  id: number;
-  owner_id: string;
-  ghcr_package: string;
-  manifest_digest: string;
-  blob_digest: string;
-  ghcr_version_id: number | null;
-}
-
-const mapBlobRow = (row: BlobRow): BlobRecord => ({
-  id: row.id,
-  ownerId: row.owner_id,
-  ghcrPackage: row.ghcr_package,
-  manifestDigest: row.manifest_digest,
-  blobDigest: row.blob_digest,
-  ghcrVersionId: row.ghcr_version_id,
-});
-
 function chunks<T>(items: readonly T[], size = SQL_BIND_CHUNK): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
@@ -146,6 +121,9 @@ function chunks<T>(items: readonly T[], size = SQL_BIND_CHUNK): T[][] {
   return out;
 }
 
+const placeholders = (count: number, offset = 1): string =>
+  Array.from({ length: count }, (_, i) => `?${i + offset}`).join(", ");
+
 export async function existingStoreHashes(
   db: SqlDatabase,
   scope: string,
@@ -154,19 +132,14 @@ export async function existingStoreHashes(
   const present = new Set<string>();
   const isMain = scope === MAIN_SCOPE;
   for (const chunk of chunks(hashes)) {
-    const rows = isMain
-      ? await db.all<{ store_hash: string }>(
-          `SELECT store_hash
-           FROM store_paths
-           WHERE scope = 'main' AND store_hash IN (${chunk.map((_, idx) => `?${idx + 1}`).join(", ")})`,
-          chunk,
-        )
-      : await db.all<{ store_hash: string }>(
-          `SELECT DISTINCT store_hash
-           FROM store_paths
-           WHERE scope IN (?1, 'main') AND store_hash IN (${chunk.map((_, idx) => `?${idx + 2}`).join(", ")})`,
-          [scope, ...chunk],
-        );
+    const rows = await db.all<{ store_hash: string }>(
+      isMain
+        ? `SELECT store_hash FROM store_paths
+           WHERE scope = 'main' AND store_hash IN (${placeholders(chunk.length)})`
+        : `SELECT DISTINCT store_hash FROM store_paths
+           WHERE scope IN (?1, 'main') AND store_hash IN (${placeholders(chunk.length, 2)})`,
+      isMain ? chunk : [scope, ...chunk],
+    );
     for (const row of rows) {
       present.add(row.store_hash);
     }
@@ -184,24 +157,25 @@ export async function commitEntries(
   }
 
   const statements: SqlStatement[] = [];
-  for (const record of records) {
+  const prUpserts = new Map<string, SqlStatement>();
+
+  for (const r of records) {
     statements.push(
       {
-        sql: `INSERT INTO blobs (
-                owner_id, ghcr_package, manifest_digest, blob_digest, file_size, created_at
-              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        sql: `INSERT INTO blobs (owner_id, ghcr_package, manifest_digest, blob_digest, file_size, created_at)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
               ON CONFLICT(owner_id, ghcr_package, blob_digest) DO UPDATE SET
                 manifest_digest = excluded.manifest_digest,
                 file_size = excluded.file_size,
                 gc_blocked = 0,
                 gc_block_reason = NULL`,
         params: [
-          record.ownerId,
-          record.ghcrPackage,
-          record.manifestDigest,
-          record.blobDigest,
-          record.fileSize,
-          record.now,
+          r.ownerId,
+          r.ghcrPackage,
+          r.manifestDigest,
+          r.blobDigest,
+          r.fileSize,
+          r.now,
         ],
       },
       {
@@ -225,56 +199,38 @@ export async function commitEntries(
                 signature = excluded.signature,
                 last_accessed_at = excluded.last_accessed_at`,
         params: [
-          record.scope,
-          record.storeHash,
-          record.storePath,
-          record.narHash,
-          record.narSize,
-          record.fileHash,
-          record.ownerId,
-          record.ghcrPackage,
-          record.blobDigest,
-          record.deriver,
-          JSON.stringify(record.references),
-          record.signature,
-          record.now,
+          r.scope,
+          r.storeHash,
+          r.storePath,
+          r.narHash,
+          r.narSize,
+          r.fileHash,
+          r.ownerId,
+          r.ghcrPackage,
+          r.blobDigest,
+          r.deriver,
+          JSON.stringify(r.references),
+          r.signature,
+          r.now,
         ],
       },
     );
 
-    if (record.prInfo) {
-      statements.push({
+    if (r.prInfo) {
+      prUpserts.set(r.scope, {
         sql: `INSERT INTO pr_scopes (owner_id, repo, pr_number, updated_at)
               VALUES (?1, ?2, ?3, ?4)
               ON CONFLICT(owner_id, repo, pr_number) DO UPDATE SET
                 updated_at = excluded.updated_at`,
-        params: [
-          record.ownerId,
-          record.prInfo.repo,
-          record.prInfo.number,
-          record.now,
-        ],
+        params: [r.ownerId, r.prInfo.repo, r.prInfo.number, r.now],
       });
     }
   }
 
+  statements.push(...prUpserts.values());
   await db.batch(statements);
 
   return records.length;
-}
-
-interface NarInfoRow {
-  id: number;
-  store_path: string;
-  nar_hash: string;
-  nar_size: number;
-  file_hash: string;
-  file_size: number;
-  blob_digest: string;
-  deriver: string | null;
-  references_json: string;
-  signature: string;
-  last_accessed_at: number;
 }
 
 export async function getNarInfo(
@@ -282,79 +238,52 @@ export async function getNarInfo(
   scope: string,
   storeHash: string,
 ): Promise<StoredNarInfo | null> {
-  const row =
-    scope === MAIN_SCOPE
-      ? await db.first<NarInfoRow>(
-          `SELECT sp.id, sp.store_path, sp.nar_hash, sp.nar_size, sp.file_hash,
-                  b.file_size, b.blob_digest, sp.deriver, sp.references_json,
-                  sp.signature, sp.last_accessed_at
-           FROM store_paths sp
-           JOIN blobs b ON b.id = sp.blob_id
-           WHERE sp.scope = 'main' AND sp.store_hash = ?1
-           LIMIT 1`,
-          [storeHash],
-        )
-      : await db.first<NarInfoRow>(
-          `SELECT sp.id, sp.store_path, sp.nar_hash, sp.nar_size, sp.file_hash,
-                  b.file_size, b.blob_digest, sp.deriver, sp.references_json,
-                  sp.signature, sp.last_accessed_at
-           FROM store_paths sp
-           JOIN blobs b ON b.id = sp.blob_id
-           WHERE sp.scope IN (?1, 'main') AND sp.store_hash = ?2
-           ORDER BY CASE WHEN sp.scope = ?1 THEN 0 ELSE 1 END
-           LIMIT 1`,
-          [scope, storeHash],
-        );
+  const isMain = scope === MAIN_SCOPE;
+  const row = await db.first<
+    Omit<StoredNarInfo, "references"> & { references_json: string }
+  >(
+    `SELECT sp.id, sp.store_path AS storePath, sp.nar_hash AS narHash,
+            sp.nar_size AS narSize, sp.file_hash AS fileHash,
+            b.file_size AS fileSize, b.blob_digest AS blobDigest,
+            sp.deriver, sp.references_json, sp.signature,
+            sp.last_accessed_at AS lastAccessedAt
+     FROM store_paths sp
+     JOIN blobs b ON b.id = sp.blob_id
+     WHERE ${
+       isMain
+         ? "sp.scope = 'main' AND sp.store_hash = ?1"
+         : "sp.scope IN (?1, 'main') AND sp.store_hash = ?2 ORDER BY CASE WHEN sp.scope = ?1 THEN 0 ELSE 1 END"
+     }
+     LIMIT 1`,
+    isMain ? [storeHash] : [scope, storeHash],
+  );
   if (!row) {
     return null;
   }
 
-  return {
-    id: row.id,
-    storePath: row.store_path,
-    narHash: row.nar_hash,
-    narSize: row.nar_size,
-    fileHash: row.file_hash,
-    fileSize: row.file_size,
-    blobDigest: row.blob_digest,
-    deriver: row.deriver,
-    references: JSON.parse(row.references_json) as string[],
-    signature: row.signature,
-    lastAccessedAt: row.last_accessed_at,
-  };
+  const { references_json, ...rest } = row;
+
+  return { ...rest, references: JSON.parse(references_json) as string[] };
 }
 
-export async function getBlobForDownload(
+export function getBlobForDownload(
   db: SqlDatabase,
   scope: string,
   blobDigest: string,
 ): Promise<BlobRecord | null> {
-  const row =
-    scope === MAIN_SCOPE
-      ? await db.first<BlobRow>(
-          `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
-           FROM blobs b
-           WHERE b.blob_digest = ?1
-             AND EXISTS (
-               SELECT 1 FROM store_paths sp
-               WHERE sp.blob_id = b.id AND sp.scope = 'main'
-             )
-           LIMIT 1`,
-          [blobDigest],
-        )
-      : await db.first<BlobRow>(
-          `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
-           FROM blobs b
-           WHERE b.blob_digest = ?1
-             AND EXISTS (
-               SELECT 1 FROM store_paths sp
-               WHERE sp.blob_id = b.id AND sp.scope IN (?2, 'main')
-             )
-           LIMIT 1`,
-          [blobDigest, scope],
-        );
+  const isMain = scope === MAIN_SCOPE;
 
-  return row ? mapBlobRow(row) : null;
+  return db.first<BlobRecord>(
+    `SELECT ${BLOB_SELECT}
+     FROM blobs b
+     WHERE b.blob_digest = ?1
+       AND EXISTS (
+         SELECT 1 FROM store_paths sp
+         WHERE sp.blob_id = b.id AND ${isMain ? "sp.scope = 'main'" : "sp.scope IN (?2, 'main')"}
+       )
+     LIMIT 1`,
+    isMain ? [blobDigest] : [blobDigest, scope],
+  );
 }
 
 export async function touchAccessedThrottled(
@@ -363,8 +292,7 @@ export async function touchAccessedThrottled(
   now: number,
 ): Promise<void> {
   await db.run(
-    `UPDATE store_paths
-     SET last_accessed_at = ?1
+    `UPDATE store_paths SET last_accessed_at = ?1
      WHERE id = ?2 AND last_accessed_at < ?3`,
     [now, id, now - TOUCH_THROTTLE_SECONDS],
   );
@@ -430,9 +358,7 @@ export async function evictStaleMainPaths(
     last_accessed_at: number;
     references_json: string;
   }>(
-    `SELECT id, store_path, last_accessed_at, references_json
-     FROM store_paths
-     WHERE scope = 'main'`,
+    "SELECT id, store_path, last_accessed_at, references_json FROM store_paths WHERE scope = 'main'",
   );
 
   const nodes = rows.map((row) => ({
@@ -469,7 +395,7 @@ export async function evictStaleMainPaths(
 
   await db.batch(
     chunks(victimIds).map((chunk) => ({
-      sql: `DELETE FROM store_paths WHERE id IN (${chunk.map((_, idx) => `?${idx + 1}`).join(", ")})`,
+      sql: `DELETE FROM store_paths WHERE id IN (${placeholders(chunk.length)})`,
       params: chunk,
     })),
   );
@@ -477,12 +403,12 @@ export async function evictStaleMainPaths(
   return victimIds.length;
 }
 
-export async function listUnreferencedBlobs(
+export const listUnreferencedBlobs = (
   db: SqlDatabase,
   ownerId: string,
-): Promise<BlobRecord[]> {
-  const rows = await db.all<BlobRow>(
-    `SELECT b.id, b.owner_id, b.ghcr_package, b.manifest_digest, b.blob_digest, b.ghcr_version_id
+): Promise<BlobRecord[]> =>
+  db.all<BlobRecord>(
+    `SELECT ${BLOB_SELECT}
      FROM blobs b
      WHERE b.owner_id = ?1
        AND b.gc_blocked = 0
@@ -490,32 +416,21 @@ export async function listUnreferencedBlobs(
     [ownerId],
   );
 
-  return rows.map(mapBlobRow);
-}
-
 export async function listKnownManifestsByPackage(
   db: SqlDatabase,
   ownerId: string,
 ): Promise<Map<string, Set<string>>> {
   const rows = await db.all<{ ghcr_package: string; manifest_digest: string }>(
-    `SELECT ghcr_package, manifest_digest
-     FROM blobs
-     WHERE owner_id = ?1
-     ORDER BY ghcr_package`,
+    "SELECT ghcr_package, manifest_digest FROM blobs WHERE owner_id = ?1 ORDER BY ghcr_package",
     [ownerId],
   );
 
-  const byPackage = new Map<string, Set<string>>();
-  for (const row of rows) {
-    let set = byPackage.get(row.ghcr_package);
-    if (!set) {
-      set = new Set();
-      byPackage.set(row.ghcr_package, set);
-    }
-    set.add(row.manifest_digest);
-  }
-
-  return byPackage;
+  return new Map(
+    [...Map.groupBy(rows, (r) => r.ghcr_package)].map(([pkg, items]) => [
+      pkg,
+      new Set(items.map((r) => r.manifest_digest)),
+    ]),
+  );
 }
 
 export async function cacheBlobVersionIds(
@@ -529,8 +444,7 @@ export async function cacheBlobVersionIds(
   }
 
   const rows = await db.all<{ id: number; manifest_digest: string }>(
-    `SELECT id, manifest_digest
-     FROM blobs
+    `SELECT id, manifest_digest FROM blobs
      WHERE owner_id = ?1 AND ghcr_package = ?2 AND ghcr_version_id IS NULL`,
     [ownerId, ghcrPackage],
   );
@@ -559,8 +473,7 @@ export async function deleteBlobIfUnreferenced(
 ): Promise<boolean> {
   const result = await db.run(
     `DELETE FROM blobs
-     WHERE id = ?1
-       AND NOT EXISTS (SELECT 1 FROM store_paths WHERE blob_id = ?1)`,
+     WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM store_paths WHERE blob_id = ?1)`,
     [blobId],
   );
 
@@ -579,22 +492,14 @@ export async function markBlobGcBlocked(
 }
 
 export async function cacheStats(db: SqlDatabase): Promise<CacheStats> {
-  const row = await db.first<{
-    main_paths: number;
-    pr_paths: number;
-    active_prs: number;
-  }>(
+  const row = await db.first<CacheStats>(
     `SELECT
-       (SELECT COUNT(*) FROM store_paths WHERE scope = 'main') AS main_paths,
-       (SELECT COUNT(*) FROM store_paths WHERE scope != 'main') AS pr_paths,
-       (SELECT COUNT(*) FROM pr_scopes) AS active_prs`,
+       (SELECT COUNT(*) FROM store_paths WHERE scope = 'main') AS mainPaths,
+       (SELECT COUNT(*) FROM store_paths WHERE scope != 'main') AS prPaths,
+       (SELECT COUNT(*) FROM pr_scopes) AS activePrs`,
   );
 
-  return {
-    mainPaths: row?.main_paths ?? 0,
-    prPaths: row?.pr_paths ?? 0,
-    activePrs: row?.active_prs ?? 0,
-  };
+  return row ?? { mainPaths: 0, prPaths: 0, activePrs: 0 };
 }
 
 export async function listOwnerSummaries(
@@ -630,27 +535,14 @@ export async function listOwnerSummaries(
     ),
     db.all<BlockedBlob & { owner_id: string }>(
       `SELECT owner_id, ghcr_package, manifest_digest, COALESCE(gc_block_reason, '') AS reason
-       FROM blobs
-       WHERE gc_blocked = 1
+       FROM blobs WHERE gc_blocked = 1
        ORDER BY ghcr_package, manifest_digest`,
     ),
   ]);
 
   const prsByOwner = new Map(prRows.map((r) => [r.owner_id, r.count]));
   const blobsByOwner = new Map(blobRows.map((r) => [r.owner_id, r]));
-  const blockedByOwner = new Map<string, BlockedBlob[]>();
-  for (const row of blockedRows) {
-    let list = blockedByOwner.get(row.owner_id);
-    if (!list) {
-      list = [];
-      blockedByOwner.set(row.owner_id, list);
-    }
-    list.push({
-      ghcr_package: row.ghcr_package,
-      manifest_digest: row.manifest_digest,
-      reason: row.reason,
-    });
-  }
+  const blockedByOwner = Map.groupBy(blockedRows, (r) => r.owner_id);
 
   return sorted.map((owner) => {
     const totals = blobsByOwner.get(owner.name);
@@ -662,7 +554,9 @@ export async function listOwnerSummaries(
       total_blobs: totals?.total_blobs ?? 0,
       total_bytes: totals?.total_bytes ?? 0,
       unreferenced_blobs: totals?.unreferenced_blobs ?? 0,
-      blocked_blobs: blockedByOwner.get(owner.name) ?? [],
+      blocked_blobs: (blockedByOwner.get(owner.name) ?? []).map(
+        ({ owner_id: _, ...blob }) => blob,
+      ),
     };
   });
 }
@@ -702,17 +596,13 @@ export async function listStorePaths(
     ["sp.store_path LIKE ?", query ? `%${query}%` : null],
   ]);
   params.push(limit);
-  const orderBy =
-    sort === "size"
-      ? "b.file_size DESC, sp.id DESC"
-      : "sp.last_accessed_at DESC, sp.id DESC";
 
   return db.all<StorePathSummary>(
     `SELECT b.owner_id, sp.scope, sp.store_path, b.file_size, sp.last_accessed_at
      FROM store_paths sp
      JOIN blobs b ON b.id = sp.blob_id
      ${where}
-     ORDER BY ${orderBy}
+     ORDER BY ${sort === "size" ? "b.file_size DESC" : "sp.last_accessed_at DESC"}, sp.id DESC
      LIMIT ?${params.length}`,
     params,
   );
@@ -733,9 +623,8 @@ export async function deleteStorePaths(
     ["store_hash = ?", filters.storeHash],
     ["store_path LIKE ?", filters.query ? `%${filters.query}%` : null],
   ]);
-  const result = await db.run(`DELETE FROM store_paths ${where}`, params);
 
-  return result.changes;
+  return (await db.run(`DELETE FROM store_paths ${where}`, params)).changes;
 }
 
 export async function listPrScopes(

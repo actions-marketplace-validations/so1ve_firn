@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CloudflareWorkerEnv } from "../entry/cloudflare.ts";
 import worker from "../entry/cloudflare.ts";
+import { MAIN_SCOPE } from "../shared/format.ts";
 import {
   SigningKeyPair,
   bytesToBase64,
@@ -29,7 +30,6 @@ import type {
 } from "../shared/protocol.ts";
 import { loadConfig } from "./config.ts";
 import {
-  MAIN_SCOPE,
   commitEntries,
   d1Adapter,
   evictStaleMainPaths,
