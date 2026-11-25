@@ -10,11 +10,13 @@
     lsp.package = pkgs.vtsls;
   };
 
-  packages = [
-    pkgs.actionlint
-    pkgs.git
-    pkgs.nixfmt
-    pkgs.prettierd
-    pkgs.vscode-langservers-extracted
+  packages = with pkgs; [
+    nixd
+    actionlint
+    git
+    nixfmt
+    prettierd
+    vscode-langservers-extracted
+    yaml-language-server
   ];
 }
