@@ -2,6 +2,7 @@ import type { Context } from "hono";
 
 import { unixNow } from "../../shared/nix-format.ts";
 import type { AppBindings } from "../app.ts";
+import { HttpError, parseOwnerQuery } from "../app.ts";
 import type { SqlDatabase } from "../db.ts";
 import {
   cacheStats,
@@ -9,7 +10,7 @@ import {
   listPrScopes,
   listStorePaths,
 } from "../db.ts";
-import { renderDashboardPage } from "../ui/page.ts";
+import { renderDashboardPage, renderPathRows } from "../ui/page.ts";
 
 export async function handleDashboard(
   c: Context<AppBindings>,
@@ -30,9 +31,7 @@ export async function handleDashboard(
       prPublicKey: config.prKey.publicString(),
       adminEnabled: config.adminToken !== null,
       gc: config.gc,
-      mainPaths: cache.mainPaths,
-      prPaths: cache.prPaths,
-      activePrs: cache.activePrs,
+      ...cache,
       owners,
       prs,
       paths,
@@ -46,15 +45,12 @@ export async function respondWithStorePaths(
   maxLimit: number,
   db: SqlDatabase = c.get("db"),
 ): Promise<Response> {
-  const owner = c.req.query("owner") || null;
-  if (owner && !c.get("config").ownersByName.has(owner)) {
-    return c.text(`unknown owner '${owner}'`, 400);
-  }
+  const owner = parseOwnerQuery(c);
   const scope = c.req.query("scope") || null;
   const query = c.req.query("q")?.trim() || null;
   const sort = c.req.query("sort") || "accessed";
   if (sort !== "accessed" && sort !== "size") {
-    return c.text(`invalid sort '${sort}'`, 400);
+    throw new HttpError(400, `invalid sort '${sort}'`);
   }
   const limitRaw = Number.parseInt(c.req.query("limit") ?? "50", 10);
   const limit =
@@ -62,8 +58,17 @@ export async function respondWithStorePaths(
       ? Math.min(limitRaw, maxLimit)
       : 50;
 
-  return c.json(await listStorePaths(db, owner, scope, limit, query, sort));
+  const items = await listStorePaths(db, owner, scope, limit, query, sort);
+  if (c.req.header("accept")?.includes("text/html")) {
+    const adminEnabled = c.get("config").adminToken !== null;
+
+    return c.html(renderPathRows(items, unixNow(), adminEnabled), 200, {
+      "X-Firn-Count": String(items.length),
+    });
+  }
+
+  return c.json(items);
 }
 
-export const handlePublicPaths = (c: Context<AppBindings>): Promise<Response> =>
+export const handlePublicPaths = (c: Context<AppBindings>) =>
   respondWithStorePaths(c, 200, c.get("readDb"));

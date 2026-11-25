@@ -32,21 +32,347 @@ export interface DashboardData {
   now: number;
 }
 
-const ghLink = (path: string, content: unknown, cls = "") =>
+const enc = encodeURIComponent;
+
+const ghLink = (path: string, content: unknown, cls?: string) =>
   html`<a${
     cls
       ? html`
           class="${cls}"
         `
       : ""
-  } href="${`https://github.com/${path}`}" target="_blank" rel="noopener noreferrer">${content}</a>`;
+  } href="https://github.com/${path}" target="_blank" rel="noopener noreferrer">${content}</a>`;
 
 function narinfoHref(scope: string, storeHash: string): string {
   const pr = parsePrScope(scope);
 
   return pr
-    ? `/pr/${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/${pr.number}/${storeHash}.narinfo`
+    ? `/pr/${enc(pr.owner)}/${enc(pr.repo)}/${pr.number}/${storeHash}.narinfo`
     : `/${storeHash}.narinfo`;
+}
+
+const renderSection = (
+  id: string,
+  title: string,
+  count: unknown,
+  body: unknown,
+) => html`
+  <section aria-labelledby="${id}">
+    <div class="sec-head">
+      <div class="sec-title">
+        <h2 id="${id}">${title}</h2>
+        <span class="sec-count">${count}</span>
+      </div>
+    </div>
+    ${body}
+  </section>
+`;
+
+const renderFilterSelect = (
+  id: string,
+  label: string,
+  options: readonly [value: string, label: string][],
+) => html`
+  <label class="sr-only" for="${id}">${label}</label>
+  <select id="${id}">
+    ${options.map(
+      ([value, text]) => html`
+        <option value="${value}">${text}</option>
+      `,
+    )}
+  </select>
+`;
+
+export function renderPathRows(
+  paths: readonly StorePathSummary[],
+  now: number,
+  adminEnabled: boolean,
+  emptyContent: unknown = "No matching store paths.",
+) {
+  if (paths.length === 0) {
+    return html`
+      <tr>
+        <td class="empty-cell" colspan="5">${emptyContent}</td>
+      </tr>
+    `;
+  }
+
+  return html`
+    ${paths.map((item) => {
+      const parts = splitStorePath(item.store_path);
+      const pr = parsePrScope(item.scope);
+      const href = narinfoHref(item.scope, parts.hash);
+
+      return html`
+        <tr>
+          <td>
+            <div class="path-cell">
+              <a
+                class="path-text mono"
+                href="${href}"
+                title="${item.store_path} (open .narinfo)"
+              >
+                <span class="hash-prefix">${parts.hash.slice(0, 8)}…-</span>
+                <span class="pkg-name">${parts.name}</span>
+              </a>
+              <span class="path-actions">
+                <button
+                  type="button"
+                  class="link-btn row-action"
+                  data-copy="${item.store_path}"
+                >
+                  copy
+                </button>
+                ${
+                  adminEnabled
+                    ? html`
+                        <button
+                          type="button"
+                          class="link-btn danger row-action admin-only"
+                          hidden
+                          data-delete-path="${item.scope}	${parts.hash}"
+                        >
+                          remove
+                        </button>
+                      `
+                    : ""
+                }
+              </span>
+            </div>
+          </td>
+          <td class="mono muted">
+            <span class="scope-label" title="${item.scope}">
+              <span
+                class="dot ${item.scope === MAIN_SCOPE ? "main" : "pr"}"
+                aria-hidden="true"
+              ></span>
+              ${
+                pr
+                  ? ghLink(
+                      `${enc(pr.owner)}/${enc(pr.repo)}/pull/${pr.number}`,
+                      item.scope,
+                      "scope-text",
+                    )
+                  : html`
+                      <span class="scope-text">${item.scope}</span>
+                    `
+              }
+            </span>
+          </td>
+          <td class="mono muted">
+            ${ghLink(enc(item.owner_id), item.owner_id)}
+          </td>
+          <td class="num mono">${formatBytes(item.file_size)}</td>
+          <td
+            class="num muted"
+            title="${new Date(item.last_accessed_at * 1000).toISOString()}"
+          >
+            ${formatAge(now, item.last_accessed_at)}
+          </td>
+        </tr>
+      `;
+    })}
+  `;
+}
+
+function renderPrsBody(data: DashboardData) {
+  if (data.prs.length === 0) {
+    return html`
+      <p class="empty-line">No active PR overlays.</p>
+    `;
+  }
+
+  return html`
+    <div class="table-scroll">
+      <table class="prs-table">
+        <colgroup>
+          <col class="col-repo" />
+          <col class="col-count" />
+          <col class="col-time" />
+          <col class="col-time" />
+          <col class="col-actions" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Repository</th>
+            <th class="num">Paths</th>
+            <th class="num">Updated</th>
+            <th class="num">TTL</th>
+            <th class="num" aria-label="Actions"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.prs.map((pr) => {
+            const overlayUrl = `${data.publicBaseUrl}/pr/${pr.owner_id}/${pr.repo}/${pr.pr_number}`;
+            const ttl = formatRemainingTtl(
+              data.now,
+              pr.updated_at,
+              data.gc.prTtlDays,
+            );
+            const ttlClass =
+              ttl.state === "expired"
+                ? "danger-text"
+                : ttl.state === "warn"
+                  ? "warn-text"
+                  : "muted";
+            const repoPath = `${enc(pr.owner_id)}/${enc(pr.repo)}`;
+
+            return html`
+              <tr>
+                <td class="mono">
+                  ${ghLink(
+                    repoPath,
+                    html`
+                      <span class="muted">${pr.owner_id}/</span>
+                      <strong>${pr.repo}</strong>
+                    `,
+                  )}
+                  ${ghLink(`${repoPath}/pull/${pr.pr_number}`, `#${pr.pr_number}`, "muted")}
+                </td>
+                <td class="num mono">${pr.path_count}</td>
+                <td
+                  class="num muted"
+                  title="${new Date(pr.updated_at * 1000).toISOString()}"
+                >
+                  ${formatAge(data.now, pr.updated_at)}
+                </td>
+                <td class="num ${ttlClass}">${ttl.text}</td>
+                <td class="num">
+                  <span class="row-actions">
+                    <button
+                      type="button"
+                      class="link-btn"
+                      data-copy="${overlayUrl}"
+                    >
+                      copy url
+                    </button>
+                    ${
+                      data.adminEnabled
+                        ? html`
+                            <button
+                              type="button"
+                              class="link-btn danger admin-only"
+                              hidden
+                              data-delete-pr="${repoPath}/${pr.pr_number}"
+                            >
+                              remove
+                            </button>
+                          `
+                        : ""
+                    }
+                  </span>
+                </td>
+              </tr>
+            `;
+          })}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderOwnersBody(
+  owners: readonly OwnerStatusSummary[],
+  maxOwnerBytes: number,
+) {
+  if (owners.length === 0) {
+    return html`
+      <p class="empty-line">No owners configured.</p>
+    `;
+  }
+
+  return html`
+    <div class="table-scroll">
+      <table class="owners-table">
+        <colgroup>
+          <col class="col-owner-name" />
+          <col class="col-share" />
+          <col class="col-size" />
+          <col class="col-count" />
+          <col class="col-count" />
+          <col class="col-count" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Owner</th>
+            <th class="share-col" aria-label="Storage share"></th>
+            <th class="num">Size</th>
+            <th class="num">Blobs</th>
+            <th class="num">Unref</th>
+            <th class="num">PRs</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${owners.map((owner) => {
+            const share =
+              owner.total_bytes > 0
+                ? Math.max(0.02, owner.total_bytes / maxOwnerBytes)
+                : 0;
+            const pkgPrefix = `${owner.owner_type === "org" ? "orgs" : "users"}/${enc(owner.name)}/packages/container/package`;
+            const hasBlocked = owner.blocked_blobs.length > 0;
+
+            return html`
+              <tr class="${hasBlocked ? "owner-has-blocked" : ""}">
+                <td class="mono">
+                  <span class="owner-name">
+                    ${ghLink(
+                      enc(owner.name),
+                      html`
+                        <strong>${owner.name}</strong>
+                      `,
+                    )}
+                    <span class="faint">${owner.owner_type}</span>
+                  </span>
+                </td>
+                <td class="share-col">
+                  <div
+                    class="share-bar"
+                    style="--share:${share.toFixed(4)}"
+                    aria-hidden="true"
+                  ></div>
+                </td>
+                <td class="num mono">
+                  <strong>${formatBytes(owner.total_bytes)}</strong>
+                </td>
+                <td class="num mono muted">${owner.total_blobs}</td>
+                <td
+                  class="num mono ${owner.unreferenced_blobs > 0 ? "muted" : "faint"}"
+                >
+                  ${owner.unreferenced_blobs}
+                </td>
+                <td
+                  class="num mono ${owner.active_prs > 0 ? "muted" : "faint"}"
+                >
+                  ${owner.active_prs}
+                </td>
+              </tr>
+              ${
+                hasBlocked
+                  ? html`
+                      <tr class="blocked-row">
+                        <td colspan="6">
+                          <ul class="blocked-list mono">
+                            ${owner.blocked_blobs.map(
+                              (b) => html`
+                                <li>
+                                  gc-blocked:
+                                  ${ghLink(`${pkgPrefix}/${enc(b.ghcr_package)}`, b.ghcr_package)}
+                                  ${b.manifest_digest.slice(0, 19)}…
+                                </li>
+                              `,
+                            )}
+                          </ul>
+                        </td>
+                      </tr>
+                    `
+                  : ""
+              }
+            `;
+          })}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 export function renderDashboardPage(data: DashboardData) {
@@ -55,14 +381,12 @@ export function renderDashboardPage(data: DashboardData) {
   let totalUnref = 0;
   let totalBlocked = 0;
   let maxOwnerBytes = 1;
-  for (const o of data.owners) {
-    totalBlobs += o.total_blobs;
-    totalBytes += o.total_bytes;
-    totalUnref += o.unreferenced_blobs;
-    totalBlocked += o.blocked_blobs.length;
-    if (o.total_bytes > maxOwnerBytes) {
-      maxOwnerBytes = o.total_bytes;
-    }
+  for (const owner of data.owners) {
+    totalBlobs += owner.total_blobs;
+    totalBytes += owner.total_bytes;
+    totalUnref += owner.unreferenced_blobs;
+    totalBlocked += owner.blocked_blobs.length;
+    maxOwnerBytes = Math.max(maxOwnerBytes, owner.total_bytes);
   }
 
   const host = new URL(data.publicBaseUrl).host;
@@ -83,287 +407,21 @@ export function renderDashboardPage(data: DashboardData) {
       code: `extra-substituters = ${data.publicBaseUrl}/pr/<owner>/<repo>/<number>\nextra-trusted-public-keys = ${data.mainPublicKey} ${data.prPublicKey}`,
     },
   ];
-  const scopeOptions = [
+  const scopes = [
     MAIN_SCOPE,
     ...data.prs.map((pr) => prScope(pr.owner_id, pr.repo, pr.pr_number)),
   ];
 
-  const pathsRows =
-    data.paths.length === 0
-      ? html`
-          <tr>
-            <td class="empty-cell" colspan="5">
-              No cached store paths yet. Push artifacts with GitHub Actions or
-              <code>firn push</code>
-              .
-            </td>
-          </tr>
-        `
-      : data.paths.map((item) => {
-          const parts = splitStorePath(item.store_path);
-          const pr = parsePrScope(item.scope);
-          const href = narinfoHref(item.scope, parts.hash);
-
-          return html`
-            <tr>
-              <td>
-                <div class="path-cell">
-                  <a
-                    class="path-text mono"
-                    href="${href}"
-                    title="${item.store_path} (open .narinfo)"
-                  >
-                    <span class="hash-prefix">${parts.hash.slice(0, 8)}…-</span>
-                    <span class="pkg-name">${parts.name}</span>
-                  </a>
-                  <span class="path-actions">
-                    <button
-                      type="button"
-                      class="link-btn row-action"
-                      data-copy="${item.store_path}"
-                    >
-                      copy
-                    </button>
-                    ${
-                      data.adminEnabled
-                        ? html`
-                            <button
-                              type="button"
-                              class="link-btn danger row-action admin-only"
-                              hidden
-                              data-delete-path="${`${item.scope}\t${parts.hash}`}"
-                            >
-                              remove
-                            </button>
-                          `
-                        : ""
-                    }
-                  </span>
-                </div>
-              </td>
-              <td class="mono muted">
-                <span class="scope-label" title="${item.scope}">
-                  <span
-                    class="dot ${item.scope === "main" ? "main" : "pr"}"
-                    aria-hidden="true"
-                  ></span>
-                  ${
-                    pr
-                      ? ghLink(
-                          `${encodeURIComponent(pr.owner)}/${encodeURIComponent(pr.repo)}/pull/${pr.number}`,
-                          item.scope,
-                          "scope-text",
-                        )
-                      : html`
-                          <span class="scope-text">${item.scope}</span>
-                        `
-                  }
-                </span>
-              </td>
-              <td class="mono muted">
-                ${ghLink(encodeURIComponent(item.owner_id), item.owner_id)}
-              </td>
-              <td class="num mono">${formatBytes(item.file_size)}</td>
-              <td
-                class="num muted"
-                title="${new Date(item.last_accessed_at * 1000).toISOString()}"
-              >
-                ${formatAge(data.now, item.last_accessed_at)}
-              </td>
-            </tr>
-          `;
-        });
-
-  const prsSectionBody =
-    data.prs.length === 0
-      ? html`
-          <p class="empty-line">No active PR overlays.</p>
-        `
-      : html`
-          <div class="table-scroll">
-            <table class="prs-table">
-              <colgroup>
-                <col class="col-repo" />
-                <col class="col-count" />
-                <col class="col-time" />
-                <col class="col-time" />
-                <col class="col-actions" />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th>Repository</th>
-                  <th class="num">Paths</th>
-                  <th class="num">Updated</th>
-                  <th class="num">TTL</th>
-                  <th class="num" aria-label="Actions"></th>
-                </tr>
-              </thead>
-              <tbody>
-                ${data.prs.map((pr) => {
-                  const overlayUrl = `${data.publicBaseUrl}/pr/${pr.owner_id}/${pr.repo}/${pr.pr_number}`;
-                  const ttl = formatRemainingTtl(
-                    data.now,
-                    pr.updated_at,
-                    data.gc.prTtlDays,
-                  );
-                  const ttlClass =
-                    ttl.state === "expired"
-                      ? "danger-text"
-                      : ttl.state === "warn"
-                        ? "warn-text"
-                        : "muted";
-                  const repoPath = `${encodeURIComponent(pr.owner_id)}/${encodeURIComponent(pr.repo)}`;
-
-                  return html`
-                    <tr>
-                      <td class="mono">
-                        ${ghLink(
-                          repoPath,
-                          html`
-                            <span class="muted">${pr.owner_id}/</span>
-                            <strong>${pr.repo}</strong>
-                          `,
-                        )}
-                        ${ghLink(`${repoPath}/pull/${pr.pr_number}`, `#${pr.pr_number}`, "muted")}
-                      </td>
-                      <td class="num mono">${pr.path_count}</td>
-                      <td
-                        class="num muted"
-                        title="${new Date(pr.updated_at * 1000).toISOString()}"
-                      >
-                        ${formatAge(data.now, pr.updated_at)}
-                      </td>
-                      <td class="num ${ttlClass}">${ttl.text}</td>
-                      <td class="num">
-                        <span class="row-actions">
-                          <button
-                            type="button"
-                            class="link-btn"
-                            data-copy="${overlayUrl}"
-                          >
-                            copy url
-                          </button>
-                          ${
-                            data.adminEnabled
-                              ? html`
-                                  <button
-                                    type="button"
-                                    class="link-btn danger admin-only"
-                                    hidden
-                                    data-delete-pr="${`${repoPath}/${pr.pr_number}`}"
-                                  >
-                                    remove
-                                  </button>
-                                `
-                              : ""
-                          }
-                        </span>
-                      </td>
-                    </tr>
-                  `;
-                })}
-              </tbody>
-            </table>
-          </div>
-        `;
-
-  const ownersSectionBody =
-    data.owners.length === 0
-      ? html`
-          <p class="empty-line">No owners configured.</p>
-        `
-      : html`
-          <div class="table-scroll">
-            <table class="owners-table">
-              <colgroup>
-                <col class="col-owner-name" />
-                <col class="col-share" />
-                <col class="col-size" />
-                <col class="col-count" />
-                <col class="col-count" />
-                <col class="col-count" />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th>Owner</th>
-                  <th class="share-col" aria-label="Storage share"></th>
-                  <th class="num">Size</th>
-                  <th class="num">Blobs</th>
-                  <th class="num">Unref</th>
-                  <th class="num">PRs</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${data.owners.map((owner) => {
-                  const share =
-                    owner.total_bytes > 0
-                      ? Math.max(0.02, owner.total_bytes / maxOwnerBytes)
-                      : 0;
-                  const pkgPrefix = `${owner.owner_type === "org" ? "orgs" : "users"}/${encodeURIComponent(owner.name)}/packages/container/package`;
-                  const hasBlocked = owner.blocked_blobs.length > 0;
-
-                  return html`
-                    <tr class="${hasBlocked ? "owner-has-blocked" : ""}">
-                      <td class="mono">
-                        <span class="owner-name">
-                          ${ghLink(
-                            encodeURIComponent(owner.name),
-                            html`
-                              <strong>${owner.name}</strong>
-                            `,
-                          )}
-                          <span class="faint">${owner.owner_type}</span>
-                        </span>
-                      </td>
-                      <td class="share-col">
-                        <div
-                          class="share-bar"
-                          style="--share:${share.toFixed(4)}"
-                          aria-hidden="true"
-                        ></div>
-                      </td>
-                      <td class="num mono">
-                        <strong>${formatBytes(owner.total_bytes)}</strong>
-                      </td>
-                      <td class="num mono muted">${owner.total_blobs}</td>
-                      <td
-                        class="num mono ${owner.unreferenced_blobs > 0 ? "muted" : "faint"}"
-                      >
-                        ${owner.unreferenced_blobs}
-                      </td>
-                      <td
-                        class="num mono ${owner.active_prs > 0 ? "muted" : "faint"}"
-                      >
-                        ${owner.active_prs}
-                      </td>
-                    </tr>
-                    ${
-                      hasBlocked
-                        ? html`
-                            <tr class="blocked-row">
-                              <td colspan="6">
-                                <ul class="blocked-list mono">
-                                  ${owner.blocked_blobs.map(
-                                    (b) => html`
-                                      <li>
-                                        gc-blocked:
-                                        ${ghLink(`${pkgPrefix}/${encodeURIComponent(b.ghcr_package)}`, b.ghcr_package)}
-                                        ${b.manifest_digest.slice(0, 19)}…
-                                      </li>
-                                    `,
-                                  )}
-                                </ul>
-                              </td>
-                            </tr>
-                          `
-                        : ""
-                    }
-                  `;
-                })}
-              </tbody>
-            </table>
-          </div>
-        `;
+  const pathsRows = renderPathRows(
+    data.paths,
+    data.now,
+    data.adminEnabled,
+    html`
+      No cached store paths yet. Push artifacts with GitHub Actions or
+      <code>firn push</code>
+      .
+    `,
+  );
 
   return html`
     <!doctype html>
@@ -553,34 +611,22 @@ export function renderDashboardPage(data: DashboardData) {
                     type="search"
                     placeholder="Filter paths…"
                   />
-                  <label class="sr-only" for="filter-owner">
-                    Filter by owner
-                  </label>
-                  <select id="filter-owner">
-                    <option value="">All owners</option>
-                    ${data.owners.map(
-                      (owner) => html`
-                        <option value="${owner.name}">${owner.name}</option>
-                      `,
-                    )}
-                  </select>
-                  <label class="sr-only" for="filter-scope">
-                    Filter by scope
-                  </label>
-                  <select id="filter-scope">
-                    <option value="">All scopes</option>
-                    ${scopeOptions.map(
-                      (scope) => html`
-                        <option value="${scope}">${scope}</option>
-                      `,
-                    )}
-                  </select>
-                  <label class="sr-only" for="filter-limit">Result limit</label>
-                  <select id="filter-limit">
-                    <option value="50">50</option>
-                    <option value="100">100</option>
-                    <option value="200">200</option>
-                  </select>
+                  ${renderFilterSelect("filter-owner", "Filter by owner", [
+                    ["", "All owners"],
+                    ...data.owners.map((o): [string, string] => [
+                      o.name,
+                      o.name,
+                    ]),
+                  ])}
+                  ${renderFilterSelect("filter-scope", "Filter by scope", [
+                    ["", "All scopes"],
+                    ...scopes.map((s): [string, string] => [s, s]),
+                  ])}
+                  ${renderFilterSelect("filter-limit", "Result limit", [
+                    ["50", "50"],
+                    ["100", "100"],
+                    ["200", "200"],
+                  ])}
                   ${
                     data.adminEnabled
                       ? html`
@@ -643,25 +689,18 @@ export function renderDashboardPage(data: DashboardData) {
               </div>
             </section>
 
-            <section aria-labelledby="prs-heading">
-              <div class="sec-head">
-                <div class="sec-title">
-                  <h2 id="prs-heading">Active PR Overlays</h2>
-                  <span class="sec-count">${data.prs.length}</span>
-                </div>
-              </div>
-              ${prsSectionBody}
-            </section>
-
-            <section aria-labelledby="owners-heading">
-              <div class="sec-head">
-                <div class="sec-title">
-                  <h2 id="owners-heading">Owners &amp; Storage</h2>
-                  <span class="sec-count">${data.owners.length}</span>
-                </div>
-              </div>
-              ${ownersSectionBody}
-            </section>
+            ${renderSection(
+              "prs-heading",
+              "Active PR Overlays",
+              data.prs.length,
+              renderPrsBody(data),
+            )}
+            ${renderSection(
+              "owners-heading",
+              "Owners & Storage",
+              data.owners.length,
+              renderOwnersBody(data.owners, maxOwnerBytes),
+            )}
           </main>
 
           <footer class="foot">

@@ -862,6 +862,16 @@ describe("firn worker", () => {
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.store_path).toContain("pr-preview");
 
+    const htmlRowsRes = await callWorker(
+      "/api/v1/public/paths?q=preview&scope=pr:so1ve:latchshot:42",
+      { headers: { Accept: "text/html" } },
+    );
+
+    expect(htmlRowsRes.status).toBe(200);
+    expect(htmlRowsRes.headers.get("content-type")).toContain("text/html");
+    expect(htmlRowsRes.headers.get("x-firn-count")).toBe("1");
+    await expect(htmlRowsRes.text()).resolves.toContain("pr-preview");
+
     const bySize = await (
       await callWorker("/api/v1/public/paths?sort=size")
     ).json<StorePathSummary[]>();
