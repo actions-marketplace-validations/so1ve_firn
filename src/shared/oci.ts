@@ -1,3 +1,4 @@
+import { readBody, stripTrailingSlash } from "./format.ts";
 import { encodeHex } from "./nix-format.ts";
 
 const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
@@ -12,7 +13,7 @@ const EMPTY_CONFIG_DIGEST =
 const MAX_RETRIES = 6;
 const BASE_RETRY_DELAY_MS = 200;
 const MAX_RETRY_DELAY_MS = 15_000;
-
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const RETRY_UNIT_MS: Record<string, number> = {
   m: 60_000,
   s: 1000,
@@ -22,19 +23,7 @@ const RETRY_UNIT_MS: Record<string, number> = {
   ns: 0.000001,
 };
 
-const isRetryableStatus = (status: number): boolean =>
-  status === 408 ||
-  status === 429 ||
-  status === 500 ||
-  status === 502 ||
-  status === 503 ||
-  status === 504;
-
 const isRedirect = (status: number): boolean => status >= 300 && status < 400;
-
-const readBody = (response: Response): Promise<string> =>
-  response.text().catch(() => "");
-
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -90,14 +79,14 @@ export class OciClient {
   readonly #ensuredConfigRepos = new Map<string, Promise<void>>();
 
   constructor(registryUrl: string) {
-    this.#registryUrl = registryUrl.replace(/\/+$/, "");
+    this.#registryUrl = stripTrailingSlash(registryUrl);
     this.#service = new URL(this.#registryUrl).host;
   }
 
   async #fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
     for (let attempt = 0; ; attempt += 1) {
       const response = await fetch(url, init);
-      if (!isRetryableStatus(response.status) || attempt >= MAX_RETRIES) {
+      if (!RETRYABLE_STATUSES.has(response.status) || attempt >= MAX_RETRIES) {
         return response;
       }
       await sleep(
@@ -116,11 +105,11 @@ export class OciClient {
       scope: `repository:${repository}:${scopeAction}`,
     });
     const url = `${this.#registryUrl}/token?${params.toString()}`;
-    const headers: Record<string, string> = basicAuth
-      ? { Authorization: `Basic ${btoa(`${basicAuth[0]}:${basicAuth[1]}`)}` }
-      : {};
-
-    const response = await this.#fetchWithRetry(url, { headers });
+    const response = await this.#fetchWithRetry(url, {
+      headers: basicAuth
+        ? { Authorization: `Basic ${btoa(`${basicAuth[0]}:${basicAuth[1]}`)}` }
+        : {},
+    });
     if (!response.ok) {
       throw new OciHttpError(
         response.status,
@@ -274,7 +263,7 @@ export class OciClient {
       }
 
       const body = await readBody(put);
-      if (isRetryableStatus(put.status) && attempt < MAX_RETRIES) {
+      if (RETRYABLE_STATUSES.has(put.status) && attempt < MAX_RETRIES) {
         await sleep(parseRetryDelayMs(put, body, attempt));
 
         continue;
@@ -313,7 +302,8 @@ export class OciClient {
     payload: Uint8Array,
     blobDigestHex: string,
   ): Promise<string> {
-    const blobDigest = `sha256:${blobDigestHex.toLowerCase()}`;
+    const lowerHex = blobDigestHex.toLowerCase();
+    const blobDigest = `sha256:${lowerHex}`;
     await this.#ensureEmptyConfig(repository, pushToken);
     await this.#putBlob(repository, pushToken, blobDigest, payload);
 
@@ -336,7 +326,7 @@ export class OciClient {
       }),
     );
 
-    const manifestUrl = `${this.#registryUrl}/v2/${repository}/manifests/nar-${blobDigestHex.toLowerCase().slice(0, 32)}`;
+    const manifestUrl = `${this.#registryUrl}/v2/${repository}/manifests/nar-${lowerHex.slice(0, 32)}`;
     const response = await this.#fetchWithRetry(manifestUrl, {
       method: "PUT",
       headers: {
@@ -355,10 +345,7 @@ export class OciClient {
     if (digestHeader) {
       return digestHeader;
     }
-    const hash = new Uint8Array(
-      await crypto.subtle.digest("SHA-256", manifestBytes),
-    );
 
-    return `sha256:${encodeHex(hash)}`;
+    return `sha256:${encodeHex(new Uint8Array(await crypto.subtle.digest("SHA-256", manifestBytes)))}`;
   }
 }

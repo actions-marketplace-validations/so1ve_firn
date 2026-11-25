@@ -22,6 +22,12 @@ export function parsePrScope(
 export const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+export const stripTrailingSlash = (url: string): string =>
+  url.trim().replace(/\/+$/, "");
+
+export const readBody = (response: Response): Promise<string> =>
+  response.text().catch(() => "");
+
 export function formatBytes(bytes: number): string {
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let value = bytes;

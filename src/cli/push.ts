@@ -8,6 +8,7 @@ import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 import type { Logger } from "clerc";
 import { createLogger } from "clerc";
 
+import { readBody, stripTrailingSlash } from "../shared/format.ts";
 import {
   encodeHex,
   formatSha256NixBase32,
@@ -169,7 +170,7 @@ function resolveAuth(serverUrl: string, options: PushOptions): AuthMode {
       );
       if (!res.ok) {
         throw new Error(
-          `GitHub Actions OIDC token request failed (${res.status}): ${await res.text().catch(() => "")}`,
+          `GitHub Actions OIDC token request failed (${res.status}): ${await readBody(res)}`,
         );
       }
 
@@ -196,7 +197,7 @@ async function postJson<TResp>(
     throw new PushHttpError(
       url,
       response.status,
-      await response.text().catch(() => ""),
+      await readBody(response),
       response.headers.get("x-firn-error"),
     );
   }
@@ -356,7 +357,7 @@ export async function runPush(options: PushOptions): Promise<void> {
     return;
   }
 
-  const serverUrl = options.server.replace(/\/+$/, "");
+  const serverUrl = stripTrailingSlash(options.server);
   const auth = resolveAuth(serverUrl, options);
 
   const plan = await postJson<PlanResponse>(

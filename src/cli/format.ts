@@ -17,6 +17,12 @@ export interface TableColumn<T> {
   value: (row: T) => string;
 }
 
+export const col = <T>(
+  header: string,
+  value: (row: T) => string,
+  align?: "left" | "right",
+): TableColumn<T> => ({ header, value, align });
+
 export function formatStorePath(theme: Theme, storePath: string): string {
   const { hash, name } = splitStorePath(storePath);
   if (!hash) {

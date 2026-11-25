@@ -478,23 +478,53 @@ describe("portable Firn server & database adapters", () => {
       expect(fs.statSync(secretPath).mode & 0o777).toBe(0o600);
       expect(migrateOut.stdout).toContain("Applied 3 migration(s)");
 
-      const missingFlagError = await execFileAsync(
-        process.execPath,
-        [CLI_ENTRY, "status"],
-        {
+      const runCliError = (
+        args: string[],
+        envOverrides: Record<string, string>,
+      ) =>
+        execFileAsync(process.execPath, [CLI_ENTRY, ...args], {
           env: {
             ...process.env,
-            FIRN_SERVER: "",
-            FIRN_ADMIN_TOKEN: "",
             NO_COLOR: "1",
+            ...envOverrides,
           },
-        },
-      ).catch((error: unknown) => error as { code?: number; stderr?: string });
+        }).catch(
+          (error: unknown) => error as { code?: number; stderr?: string },
+        );
+
+      const [missingFlagError, pushNoInputError, pushConflictError, jobsError] =
+        await Promise.all([
+          runCliError(["status"], { FIRN_SERVER: "", FIRN_ADMIN_TOKEN: "" }),
+          runCliError(["push"], { FIRN_SERVER: "https://cache.local" }),
+          runCliError(
+            [
+              "push",
+              "--include-upstream",
+              "--skip-signed-by",
+              "foo:",
+              "./result",
+            ],
+            { FIRN_SERVER: "https://cache.local" },
+          ),
+          runCliError(["push", "--jobs", "0", "./result"], {
+            FIRN_SERVER: "https://cache.local",
+          }),
+        ]);
 
       expect(missingFlagError).toMatchObject({ code: 2 });
       expect(
         "stderr" in missingFlagError ? missingFlagError.stderr : "",
       ).toContain("FIRN_SERVER");
+      expect(pushNoInputError).toMatchObject({ code: 2 });
+      expect(
+        "stderr" in pushNoInputError ? pushNoInputError.stderr : "",
+      ).toContain("at least one");
+      expect(pushConflictError).toMatchObject({ code: 2 });
+      expect(
+        "stderr" in pushConflictError ? pushConflictError.stderr : "",
+      ).toContain("cannot be used together");
+      expect(jobsError).toMatchObject({ code: 2 });
+      expect("stderr" in jobsError ? jobsError.stderr : "").toContain(">= 1");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

@@ -47,7 +47,7 @@
             inherit (finalAttrs) pname version src;
             fetcherVersion = 5;
             pnpmInstallFlags = [ "--prod" ];
-            hash = "sha256-HLk/PHJmBE9xkfap3gc/f4SmEFtTLNbgU1ixVCduwJE=";
+            hash = "sha256-KiWQ3ldi4yGYMfvGldedSYBpMb9BArQxSwUvLsj87Qg=";
           };
 
           pnpmInstallFlags = [ "--prod" ];
