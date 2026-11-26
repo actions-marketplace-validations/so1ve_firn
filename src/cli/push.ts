@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline";
+import { Transform } from "node:stream";
 import { promisify } from "node:util";
 import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 
@@ -205,8 +206,128 @@ async function postJson<TResp>(
   return await response.json();
 }
 
-async function dumpAndCompressNar(storePath: string, zstdLevel: number) {
-  const child = spawn("nix-store", ["--dump", storePath], {
+export function groupByDependencyOrder(
+  items: readonly NixPathInfo[],
+  batchSize: number = COMMIT_BATCH_SIZE,
+): NixPathInfo[][] {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const ordered = [...items].sort((a, b) => a.path.localeCompare(b.path));
+  const byHash = new Map<string, number>();
+  for (const [idx, item] of ordered.entries()) {
+    byHash.set(item.storeHash, idx);
+  }
+
+  // Edges point dependent -> dependency so Tarjan emits dependencies first.
+  const deps: number[][] = ordered.map((item, idx) => {
+    const edges: number[] = [];
+    for (const ref of item.references) {
+      const depIdx = byHash.get(ref.slice(0, 32));
+      if (depIdx !== undefined && depIdx !== idx) {
+        edges.push(depIdx);
+      }
+    }
+    edges.sort((a, b) => a - b);
+
+    return edges;
+  });
+
+  const n = ordered.length;
+  const index = new Int32Array(n).fill(-1);
+  const lowlink = new Int32Array(n);
+  const onStack = new Uint8Array(n);
+  const tarjanStack: number[] = [];
+  const sccs: NixPathInfo[][] = [];
+  let nextIndex = 0;
+
+  for (let start = 0; start < n; start += 1) {
+    if (index[start] !== -1) {
+      continue;
+    }
+
+    const frames: [number, number][] = [[start, 0]];
+    index[start] = nextIndex;
+    lowlink[start] = nextIndex;
+    nextIndex += 1;
+    tarjanStack.push(start);
+    onStack[start] = 1;
+
+    while (frames.length > 0) {
+      const frame = frames.at(-1)!;
+      const v = frame[0];
+      const edges = deps[v];
+
+      if (frame[1] < edges.length) {
+        const w = edges[frame[1]];
+        frame[1] += 1;
+
+        if (index[w] === -1) {
+          index[w] = nextIndex;
+          lowlink[w] = nextIndex;
+          nextIndex += 1;
+          tarjanStack.push(w);
+          onStack[w] = 1;
+          frames.push([w, 0]);
+        } else if (onStack[w] === 1 && index[w] < lowlink[v]) {
+          lowlink[v] = index[w];
+        }
+      } else {
+        frames.pop();
+        if (frames.length > 0) {
+          const parent = frames.at(-1)![0];
+          if (lowlink[v] < lowlink[parent]) {
+            lowlink[parent] = lowlink[v];
+          }
+        }
+
+        if (lowlink[v] === index[v]) {
+          const component: NixPathInfo[] = [];
+          while (true) {
+            const w = tarjanStack.pop()!;
+            onStack[w] = 0;
+            component.push(ordered[w]);
+            if (w === v) {
+              break;
+            }
+          }
+          component.sort((a, b) => a.path.localeCompare(b.path));
+          sccs.push(component);
+        }
+      }
+    }
+  }
+
+  // Pack SCCs into commit batches without splitting any cyclic component.
+  const batches: NixPathInfo[][] = [];
+  let current: NixPathInfo[] = [];
+  for (const scc of sccs) {
+    if (current.length > 0 && current.length + scc.length > batchSize) {
+      batches.push(current);
+      current = [];
+    }
+    current.push(...scc);
+    if (current.length >= batchSize) {
+      batches.push(current);
+      current = [];
+    }
+  }
+  if (current.length > 0) {
+    batches.push(current);
+  }
+
+  return batches;
+}
+
+async function uploadCompressedNar(
+  oci: OciClient,
+  repository: string,
+  getPushToken: () => Promise<string>,
+  info: NixPathInfo,
+  zstdLevel: number,
+) {
+  const child = spawn("nix-store", ["--dump", info.path], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const compressor = createZstdCompress({
@@ -215,48 +336,91 @@ async function dumpAndCompressNar(storePath: string, zstdLevel: number) {
 
   const narHasher = createHash("sha256");
   const fileHasher = createHash("sha256");
-  const chunks: Buffer[] = [];
   let narSize = 0;
   let stderr = "";
+  let childExited = false;
+
+  const narMeter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      narHasher.update(chunk);
+      narSize += chunk.length;
+      callback(null, chunk);
+    },
+  });
 
   child.stderr.on("data", (chunk: Buffer) => {
     stderr += chunk.toString("utf8");
   });
-  child.stdout.on("data", (chunk: Buffer) => {
-    narHasher.update(chunk);
-    narSize += chunk.length;
-  });
-  compressor.on("data", (chunk: Buffer) => {
-    fileHasher.update(chunk);
-    chunks.push(chunk);
-  });
+  child.stdout.on("error", (err) => narMeter.destroy(err));
+  narMeter.on("error", (err) => compressor.destroy(err));
 
   const childDone = new Promise<void>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (code) =>
-      code === 0
-        ? resolve()
-        : reject(
-            new Error(
-              `nix-store --dump ${storePath} exited with ${code}: ${stderr.trim()}`,
-            ),
+    child.on("error", (err) => {
+      childExited = true;
+      narMeter.destroy(err);
+      compressor.destroy(err);
+      reject(err);
+    });
+    child.on("close", (code, signal) => {
+      childExited = true;
+      if (code === 0) {
+        resolve();
+      } else {
+        const detail =
+          code === null ? `killed by ${signal}` : `exited with ${code}`;
+        reject(
+          new Error(
+            `nix-store --dump ${info.path} ${detail}: ${stderr.trim()}`,
           ),
+        );
+      }
+    });
+  });
+  childDone.catch(() => {});
+
+  child.stdout.pipe(narMeter).pipe(compressor);
+
+  let fileSha256: Buffer | null = null;
+  async function* compressedChunks(): AsyncGenerator<Uint8Array> {
+    for await (const chunk of compressor as AsyncIterable<Buffer>) {
+      fileHasher.update(chunk);
+      yield chunk;
+    }
+    await childDone;
+    if (narSize !== info.narSize) {
+      throw new Error(
+        `NAR size mismatch for ${info.path}: nix path-info reported ${info.narSize}, dump produced ${narSize}`,
+      );
+    }
+    fileSha256 = fileHasher.digest();
+  }
+
+  try {
+    const { manifestDigest, fileSize } = await oci.uploadNarStream(
+      repository,
+      getPushToken,
+      compressedChunks(),
+      () => encodeHex(fileSha256!),
     );
-  });
-  const streamDone = new Promise<void>((resolve, reject) => {
-    compressor.on("error", reject);
-    compressor.on("end", resolve);
-  });
 
-  child.stdout.pipe(compressor);
-  await Promise.all([childDone, streamDone]);
+    return {
+      narSha256: narHasher.digest(),
+      narSize,
+      fileSha256: fileSha256!,
+      fileSize,
+      manifestDigest,
+    };
+  } catch (error) {
+    compressor.destroy();
+    narMeter.destroy();
+    child.stdout.destroy();
+    if (!childExited) {
+      child.kill();
+    }
+    await childDone.catch(() => {});
 
-  return {
-    compressed: Buffer.concat(chunks),
-    narSha256: narHasher.digest(),
-    narSize,
-    fileSha256: fileHasher.digest(),
-  };
+    throw error;
+  }
 }
 
 async function mapWithConcurrency<T, R>(
@@ -410,49 +574,42 @@ export async function runPush(options: PushOptions): Promise<void> {
 
   const byHash = new Map(candidates.map((item) => [item.storeHash, item]));
   const missingInfos = plan.missing.map((hash) => byHash.get(hash)!);
+  const batches = groupByDependencyOrder(missingInfos, COMMIT_BATCH_SIZE);
 
   let uploadedCount = 0;
   let uploadedBytes = 0;
   let uploadedNarBytes = 0;
   let totalCommitted = 0;
-  const totalBatches = Math.ceil(missingInfos.length / COMMIT_BATCH_SIZE);
 
-  for (let i = 0; i < missingInfos.length; i += COMMIT_BATCH_SIZE) {
-    const batchIndex = Math.floor(i / COMMIT_BATCH_SIZE) + 1;
-    const chunk = missingInfos.slice(i, i + COMMIT_BATCH_SIZE);
-    const pushToken = await getPushToken();
+  for (const [batchIdx, chunk] of batches.entries()) {
+    const batchIndex = batchIdx + 1;
     const entries = await mapWithConcurrency(
       chunk,
       options.jobs,
       async (info): Promise<CommitEntry> => {
-        const dumped = await dumpAndCompressNar(info.path, options.zstdLevel);
-        if (dumped.narSize !== info.narSize) {
-          throw new Error(
-            `NAR size mismatch for ${info.path}: nix path-info reported ${info.narSize}, dump produced ${dumped.narSize}`,
-          );
-        }
-        const blobDigest = encodeHex(dumped.fileSha256);
-        const manifestDigest = await oci.uploadNarBlob(
+        const uploaded = await uploadCompressedNar(
+          oci,
           plan.ghcr_repository,
-          pushToken,
-          dumped.compressed,
-          blobDigest,
+          getPushToken,
+          info,
+          options.zstdLevel,
         );
+        const blobDigest = encodeHex(uploaded.fileSha256);
 
         uploadedCount += 1;
-        uploadedBytes += dumped.compressed.length;
-        uploadedNarBytes += dumped.narSize;
+        uploadedBytes += uploaded.fileSize;
+        uploadedNarBytes += uploaded.narSize;
         uploadEntry.line(
-          `[${uploadedCount}/${missingInfos.length}] ${formatStorePath(theme, info.path)} (${formatBytes(dumped.compressed.length)} / ${formatBytes(dumped.narSize)} NAR)`,
+          `[${uploadedCount}/${missingInfos.length}] ${formatStorePath(theme, info.path)} (${formatBytes(uploaded.fileSize)} / ${formatBytes(uploaded.narSize)} NAR)`,
         );
 
         return {
           store_path: info.path,
-          nar_hash: formatSha256NixBase32(dumped.narSha256),
-          nar_size: dumped.narSize,
-          file_hash: formatSha256NixBase32(dumped.fileSha256),
-          file_size: dumped.compressed.length,
-          manifest_digest: manifestDigest,
+          nar_hash: formatSha256NixBase32(uploaded.narSha256),
+          nar_size: uploaded.narSize,
+          file_hash: formatSha256NixBase32(uploaded.fileSha256),
+          file_size: uploaded.fileSize,
+          manifest_digest: uploaded.manifestDigest,
           blob_digest: blobDigest,
           deriver: info.deriver,
           references: info.references,
@@ -466,9 +623,9 @@ export async function runPush(options: PushOptions): Promise<void> {
       { owner: options.owner, entries } satisfies CommitRequest,
     );
     totalCommitted += committed.committed;
-    if (totalBatches > 1) {
+    if (batches.length > 1) {
       uploadEntry.line(
-        `Committed batch ${batchIndex}/${totalBatches} (${committed.committed} paths)`,
+        `Committed batch ${batchIndex}/${batches.length} (${committed.committed} paths)`,
       );
     }
   }

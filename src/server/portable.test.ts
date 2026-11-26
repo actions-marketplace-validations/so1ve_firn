@@ -1,16 +1,20 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import manifest from "../../package.json" with { type: "json" };
+import type { NixPathInfo } from "../cli/push.ts";
+import { groupByDependencyOrder } from "../cli/push.ts";
 import { resolveEnvWithFiles, startNodeServer } from "../entry/node.ts";
 import { createWebApp } from "../entry/web.ts";
 import { MAIN_SCOPE } from "../shared/format.ts";
 import { SigningKeyPair, unixNow } from "../shared/nix-format.ts";
+import { OciClient } from "../shared/oci.ts";
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { normalizeLibsqlHttpUrl, openLibsql } from "./db/libsql.ts";
@@ -528,5 +532,421 @@ describe("portable Firn server & database adapters", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("streams OCI blobs in chunks, respects OCI-Chunk-Min-Length, recovers on retry, and cancels on error", async () => {
+    const sha256Hex = (data: Uint8Array) =>
+      createHash("sha256").update(data).digest("hex");
+
+    async function* yieldSlices(
+      data: Uint8Array,
+      sliceSizes: readonly number[],
+      failAfter?: number,
+    ): AsyncGenerator<Uint8Array> {
+      let pos = 0;
+      let i = 0;
+      while (pos < data.byteLength) {
+        const size = sliceSizes[i % sliceSizes.length];
+        i += 1;
+        yield data.subarray(pos, Math.min(pos + size, data.byteLength));
+        pos += size;
+        if (failAfter !== undefined && pos >= failAfter) {
+          throw new Error("simulated dump failure");
+        }
+      }
+    }
+
+    const originalFetch = globalThis.fetch;
+    try {
+      // 1. Small stream (< chunkSize): monolithic HEAD + POST + PUT, zero PATCH.
+      {
+        const payload = new Uint8Array([1, 2, 3, 4, 5, 6, 7]);
+        const digestHex = sha256Hex(payload);
+        const methods: string[] = [];
+        let uploadedBody: Uint8Array | null = null;
+        let uploadedDigest: string | null = null;
+        let manifestSize = -1;
+
+        vi.stubGlobal(
+          "fetch",
+          async (input: RequestInfo | URL, init?: RequestInit) => {
+            const req = new Request(input, init);
+            const url = new URL(req.url);
+            methods.push(`${req.method} ${url.pathname}`);
+
+            if (req.method === "HEAD") {
+              // Empty config already exists; NAR blob does not.
+              return new Response(null, {
+                status: url.pathname.endsWith(digestHex) ? 404 : 200,
+              });
+            }
+            if (req.method === "POST" && url.pathname.endsWith("/uploads/")) {
+              return new Response(null, {
+                status: 202,
+                headers: { Location: "/v2/so1ve/demo/blobs/uploads/mono-1" },
+              });
+            }
+            if (req.method === "PUT" && url.pathname.includes("/uploads/")) {
+              uploadedDigest = url.searchParams.get("digest");
+              uploadedBody = new Uint8Array(await req.arrayBuffer());
+
+              return new Response(null, { status: 201 });
+            }
+            if (req.method === "PUT" && url.pathname.includes("/manifests/")) {
+              const manifestJson = await req.json<{
+                layers: { size: number; digest: string }[];
+              }>();
+              manifestSize = manifestJson.layers[0].size;
+
+              return new Response(null, {
+                status: 201,
+                headers: {
+                  "docker-content-digest": `sha256:${"1".repeat(64)}`,
+                },
+              });
+            }
+
+            throw new Error(`unexpected ${req.method} ${req.url}`);
+          },
+        );
+
+        const oci = new OciClient("https://ghcr.mock");
+        const result = await oci.uploadNarStream(
+          "so1ve/demo",
+          "tok",
+          yieldSlices(payload, [3, 4]),
+          () => digestHex,
+          16,
+        );
+
+        expect(result).toEqual({
+          manifestDigest: `sha256:${"1".repeat(64)}`,
+          fileSize: payload.byteLength,
+        });
+        expect(uploadedDigest).toBe(`sha256:${digestHex}`);
+        expect(uploadedBody).toEqual(payload);
+        expect(manifestSize).toBe(payload.byteLength);
+        expect(methods.some((m) => m.startsWith("PATCH"))).toBeFalsy();
+      }
+
+      // 2. Large stream (> chunkSize) with OCI-Chunk-Min-Length, 429 retry, 503->416 GET recovery, and token rotation.
+      {
+        const payload = Uint8Array.from({ length: 37 }, (_, i) => i + 1);
+        const digestHex = sha256Hex(payload);
+        const received: number[] = [];
+        const patchRanges: string[] = [];
+        const seenTokens = new Set<string>();
+        let tokenCounter = 0;
+        let patchStep = 0;
+        let firstChunkFailedOnce = false;
+        let secondChunkGhostAccepted = false;
+        let finalPutLength: string | null = null;
+        let finalPutDigest: string | null = null;
+        let finalPutBodyBytes = -1;
+        let allPatchLengthsMatched = true;
+        let finalManifestSize = -1;
+
+        vi.stubGlobal(
+          "fetch",
+          async (input: RequestInfo | URL, init?: RequestInit) => {
+            const req = new Request(input, init);
+            const url = new URL(req.url);
+            const auth = req.headers.get("authorization");
+            if (auth) {
+              seenTokens.add(auth);
+            }
+
+            if (req.method === "HEAD") {
+              return new Response(null, { status: 200 });
+            }
+            if (req.method === "POST" && url.pathname.endsWith("/uploads/")) {
+              return new Response(null, {
+                status: 202,
+                headers: {
+                  "Location": "/v2/so1ve/demo/blobs/uploads/sess-0",
+                  "OCI-Chunk-Min-Length": "16",
+                },
+              });
+            }
+            if (req.method === "PATCH") {
+              const range = req.headers.get("content-range")!;
+              const body = new Uint8Array(await req.arrayBuffer());
+              if (
+                req.headers.get("content-length") !== String(body.byteLength)
+              ) {
+                allPatchLengthsMatched = false;
+              }
+
+              if (range === "0-15" && !firstChunkFailedOnce) {
+                firstChunkFailedOnce = true;
+
+                return new Response("retry-after: 1ms", { status: 429 });
+              }
+              if (range === "16-31") {
+                if (!secondChunkGhostAccepted) {
+                  secondChunkGhostAccepted = true;
+                  received.push(...body);
+                  patchRanges.push(range);
+                  patchStep += 1;
+
+                  return new Response("gateway timeout", { status: 503 });
+                }
+
+                return new Response("range already uploaded", { status: 416 });
+              }
+
+              received.push(...body);
+              patchRanges.push(range);
+              patchStep += 1;
+
+              return new Response(null, {
+                status: 202,
+                headers: {
+                  Location: `/v2/so1ve/demo/blobs/uploads/sess-${patchStep}`,
+                  Range: `0-${received.length - 1}`,
+                },
+              });
+            }
+            if (req.method === "GET" && url.pathname.includes("/uploads/")) {
+              return new Response(null, {
+                status: 204,
+                headers: {
+                  Location: `/v2/so1ve/demo/blobs/uploads/sess-${patchStep}`,
+                  Range: `0-${received.length - 1}`,
+                },
+              });
+            }
+            if (req.method === "PUT" && url.pathname.includes("/uploads/")) {
+              finalPutLength = req.headers.get("content-length");
+              finalPutDigest = url.searchParams.get("digest");
+              finalPutBodyBytes = (await req.arrayBuffer()).byteLength;
+
+              return new Response(null, { status: 201 });
+            }
+            if (req.method === "PUT" && url.pathname.includes("/manifests/")) {
+              const manifestJson = await req.json<{
+                layers: { size: number }[];
+              }>();
+              finalManifestSize = manifestJson.layers[0].size;
+
+              return new Response(null, {
+                status: 201,
+                headers: {
+                  "docker-content-digest": `sha256:${"2".repeat(64)}`,
+                },
+              });
+            }
+
+            throw new Error(`unexpected ${req.method} ${req.url}`);
+          },
+        );
+
+        const oci = new OciClient("https://ghcr.mock");
+        const result = await oci.uploadNarStream(
+          "so1ve/demo",
+          async () => {
+            tokenCounter += 1;
+
+            return `tok-${tokenCounter}`;
+          },
+          yieldSlices(payload, [5, 7, 3]),
+          () => digestHex,
+          8,
+        );
+
+        expect(result).toEqual({
+          manifestDigest: `sha256:${"2".repeat(64)}`,
+          fileSize: payload.byteLength,
+        });
+        expect(new Uint8Array(received)).toEqual(payload);
+        expect(patchRanges).toEqual(["0-15", "16-31", "32-36"]);
+        expect(allPatchLengthsMatched).toBeTruthy();
+        expect(finalPutLength).toBe("0");
+        expect(finalPutDigest).toBe(`sha256:${digestHex}`);
+        expect(finalPutBodyBytes).toBe(0);
+        expect(finalManifestSize).toBe(payload.byteLength);
+        expect(seenTokens.size).toBeGreaterThan(3);
+      }
+
+      // 3. Exact chunk boundary (20 bytes with chunkSize 10) + mid-stream cancellation.
+      {
+        const payload = Uint8Array.from({ length: 20 }, (_, i) => i);
+        const digestHex = sha256Hex(payload);
+        const exactRanges: string[] = [];
+
+        vi.stubGlobal(
+          "fetch",
+          async (input: RequestInfo | URL, init?: RequestInit) => {
+            const req = new Request(input, init);
+            const url = new URL(req.url);
+            if (req.method === "HEAD") {
+              return new Response(null, { status: 200 });
+            }
+            if (req.method === "POST") {
+              return new Response(null, {
+                status: 202,
+                headers: { Location: "/v2/so1ve/demo/blobs/uploads/exact" },
+              });
+            }
+            if (req.method === "PATCH") {
+              exactRanges.push(req.headers.get("content-range")!);
+
+              return new Response(null, {
+                status: 202,
+                headers: { Location: "/v2/so1ve/demo/blobs/uploads/exact" },
+              });
+            }
+            if (req.method === "PUT" && url.pathname.includes("/uploads/")) {
+              return new Response(null, { status: 201 });
+            }
+            if (req.method === "PUT" && url.pathname.includes("/manifests/")) {
+              return new Response(null, {
+                status: 201,
+                headers: {
+                  "docker-content-digest": `sha256:${"3".repeat(64)}`,
+                },
+              });
+            }
+
+            throw new Error(`unexpected ${req.method} ${req.url}`);
+          },
+        );
+
+        const oci = new OciClient("https://ghcr.mock");
+        const exact = await oci.uploadNarStream(
+          "so1ve/demo",
+          "tok",
+          yieldSlices(payload, [10, 10]),
+          () => digestHex,
+          10,
+        );
+
+        expect(exact.fileSize).toBe(20);
+        expect(exactRanges).toEqual(["0-9", "10-19"]);
+
+        // Now verify mid-stream failure sends DELETE and never finalizes PUT.
+        let cancelledUrl: string | null = null;
+        let putCalled = false;
+        vi.stubGlobal(
+          "fetch",
+          async (input: RequestInfo | URL, init?: RequestInit) => {
+            const req = new Request(input, init);
+            if (req.method === "POST") {
+              return new Response(null, {
+                status: 202,
+                headers: { Location: "/v2/so1ve/demo/blobs/uploads/abort-1" },
+              });
+            }
+            if (req.method === "PATCH") {
+              return new Response(null, {
+                status: 202,
+                headers: { Location: "/v2/so1ve/demo/blobs/uploads/abort-2" },
+              });
+            }
+            if (req.method === "DELETE") {
+              cancelledUrl = req.url;
+
+              return new Response(null, { status: 204 });
+            }
+            if (req.method === "PUT") {
+              putCalled = true;
+
+              return new Response(null, { status: 201 });
+            }
+
+            throw new Error(`unexpected ${req.method} ${req.url}`);
+          },
+        );
+
+        await expect(
+          oci.uploadNarStream(
+            "so1ve/demo",
+            "tok",
+            yieldSlices(payload, [12, 8], 12),
+            () => digestHex,
+            10,
+          ),
+        ).rejects.toThrow("simulated dump failure");
+        expect(cancelledUrl).toBe(
+          "https://ghcr.mock/v2/so1ve/demo/blobs/uploads/abort-2",
+        );
+        expect(putCalled).toBeFalsy();
+      }
+    } finally {
+      vi.stubGlobal("fetch", originalFetch);
+    }
+  });
+
+  it("orders commit batches in dependency order and keeps mutual reference cycles atomic", () => {
+    function makeInfo(
+      id: string,
+      name: string,
+      refs: readonly string[] = [],
+    ): NixPathInfo {
+      const hash = id.padStart(32, "0");
+
+      return {
+        path: `/nix/store/${hash}-${name}`,
+        storeHash: hash,
+        narSize: 100,
+        deriver: null,
+        ca: null,
+        references: [...refs],
+        signatures: [],
+      };
+    }
+
+    const ref = (id: string, name: string) => `${id.padStart(32, "0")}-${name}`;
+
+    // Intentionally give dependents lexicographically smaller hashes than dependencies.
+    const app = makeInfo("1", "app", [
+      ref("1", "app"), // self-reference
+      ref("2", "lib"),
+      ref("999", "already-cached"), // external reference
+    ]);
+    const lib = makeInfo("2", "lib", [ref("3", "cyc-a"), ref("4", "cyc-b")]);
+    const cycA = makeInfo("3", "cyc-a", [ref("4", "cyc-b"), ref("5", "leaf")]);
+    const cycB = makeInfo("4", "cyc-b", [ref("3", "cyc-a")]);
+    const leaf = makeInfo("5", "leaf");
+
+    const batches = groupByDependencyOrder([app, lib, cycA, cycB, leaf], 2);
+
+    // Every dependency must appear in an earlier or equal batch.
+    const batchOf = new Map<string, number>();
+    for (const [idx, batch] of batches.entries()) {
+      for (const item of batch) {
+        batchOf.set(item.storeHash, idx);
+      }
+    }
+
+    expect(batchOf.get(leaf.storeHash)!).toBeLessThan(
+      batchOf.get(cycA.storeHash)!,
+    );
+    // Mutual cycle must never be split across batches.
+    expect(batchOf.get(cycA.storeHash)).toBe(batchOf.get(cycB.storeHash));
+    expect(batchOf.get(cycA.storeHash)!).toBeLessThan(
+      batchOf.get(lib.storeHash)!,
+    );
+    expect(batchOf.get(lib.storeHash)!).toBeLessThanOrEqual(
+      batchOf.get(app.storeHash)!,
+    );
+
+    // Deep linear chain (1500 nodes) runs iteratively without stack overflow.
+    const deep: NixPathInfo[] = [];
+    for (let i = 0; i < 1500; i += 1) {
+      const id = String(i + 1);
+      const nextId = String(i + 2);
+      deep.push(
+        makeInfo(id, `pkg-${i}`, i < 1499 ? [ref(nextId, `pkg-${i + 1}`)] : []),
+      );
+    }
+    const deepBatches = groupByDependencyOrder(deep, 15);
+
+    expect(deepBatches).toHaveLength(100);
+
+    const flatHashes = deepBatches.flat().map((item) => item.storeHash);
+
+    expect(flatHashes[0]).toBe("1500".padStart(32, "0"));
+    expect(flatHashes.at(-1)).toBe("1".padStart(32, "0"));
   });
 });

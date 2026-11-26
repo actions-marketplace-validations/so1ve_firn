@@ -13,6 +13,10 @@ const EMPTY_CONFIG_DIGEST =
 const MAX_RETRIES = 6;
 const BASE_RETRY_DELAY_MS = 200;
 const MAX_RETRY_DELAY_MS = 15_000;
+
+export const DEFAULT_UPLOAD_CHUNK_SIZE = 16 * 1024 * 1024;
+
+const MAX_UPLOAD_CHUNK_SIZE = 128 * 1024 * 1024;
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const RETRY_UNIT_MS: Record<string, number> = {
   m: 60_000,
@@ -23,9 +27,40 @@ const RETRY_UNIT_MS: Record<string, number> = {
   ns: 0.000001,
 };
 
+export type TokenProvider = string | (() => Promise<string>);
+
 const isRedirect = (status: number): boolean => status >= 300 && status < 400;
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+const resolveToken = (token: TokenProvider): Promise<string> | string =>
+  typeof token === "function" ? token() : token;
+
+function takeBytes(queue: Uint8Array[], count: number): Uint8Array {
+  if (count === 0) {
+    return new Uint8Array(0);
+  }
+  if (queue.length === 1 && queue[0].byteLength === count) {
+    return queue.shift()!;
+  }
+
+  const out = new Uint8Array(count);
+  let written = 0;
+  while (written < count) {
+    const head = queue[0];
+    const needed = count - written;
+    if (head.byteLength <= needed) {
+      out.set(head, written);
+      written += head.byteLength;
+      queue.shift();
+    } else {
+      out.set(head.subarray(0, needed), written);
+      queue[0] = head.subarray(needed);
+      written += needed;
+    }
+  }
+
+  return out;
+}
 
 function parseRetryDelayMs(
   response: Response,
@@ -83,9 +118,13 @@ export class OciClient {
     this.#service = new URL(this.#registryUrl).host;
   }
 
-  async #fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
+  async #fetchWithRetry(
+    url: string,
+    init?: RequestInit | (() => Promise<RequestInit> | RequestInit),
+  ): Promise<Response> {
     for (let attempt = 0; ; attempt += 1) {
-      const response = await fetch(url, init);
+      const requestInit = typeof init === "function" ? await init() : init;
+      const response = await fetch(url, requestInit);
       if (!RETRYABLE_STATUSES.has(response.status) || attempt >= MAX_RETRIES) {
         return response;
       }
@@ -184,6 +223,7 @@ export class OciClient {
 
     if (isRedirect(response.status)) {
       const location = response.headers.get("location");
+      await response.body?.cancel();
       if (!location) {
         throw new Error(
           `OCI registry returned ${response.status} without Location header for ${blobUrl}`,
@@ -200,24 +240,164 @@ export class OciClient {
 
   async #blobExists(
     repository: string,
-    token: string,
+    token: TokenProvider,
     digest: string,
   ): Promise<boolean> {
     const response = await this.#fetchWithRetry(
       `${this.#registryUrl}/v2/${repository}/blobs/${digest}`,
-      {
+      async () => ({
         method: "HEAD",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${await resolveToken(token)}` },
         redirect: "manual",
-      },
+      }),
     );
+    await response.body?.cancel();
 
     return response.ok || isRedirect(response.status);
   }
 
+  async #startUploadSession(
+    repository: string,
+    pushToken: TokenProvider,
+  ): Promise<{ uploadUrl: string; minChunkSize: number }> {
+    const startUrl = `${this.#registryUrl}/v2/${repository}/blobs/uploads/`;
+    const start = await this.#fetchWithRetry(startUrl, async () => ({
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${await resolveToken(pushToken)}`,
+        "Content-Length": "0",
+      },
+    }));
+    if (start.status !== 202 && !start.ok) {
+      throw new Error(
+        `failed to initiate blob upload to ${startUrl} (${start.status}): ${await readBody(start)}`,
+      );
+    }
+
+    const location = start.headers.get("location");
+    const rawMin = Number.parseInt(
+      start.headers.get("oci-chunk-min-length") ?? "",
+      10,
+    );
+    await start.body?.cancel();
+    if (!location) {
+      throw new Error(`blob upload response from ${startUrl} missing Location`);
+    }
+
+    return {
+      uploadUrl: new URL(location, this.#registryUrl).toString(),
+      minChunkSize: Number.isFinite(rawMin) && rawMin > 0 ? rawMin : 0,
+    };
+  }
+
+  async #patchChunk(
+    uploadUrl: string,
+    pushToken: TokenProvider,
+    chunk: Uint8Array,
+    offset: number,
+  ): Promise<string> {
+    const end = offset + chunk.byteLength - 1;
+    for (let attempt = 0; ; attempt += 1) {
+      const token = await resolveToken(pushToken);
+      const response = await fetch(uploadUrl, {
+        method: "PATCH",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(chunk.byteLength),
+          "Content-Range": `${offset}-${end}`,
+        },
+        body: chunk as BodyInit,
+      });
+
+      if (response.status === 202 || response.ok) {
+        const nextLocation = response.headers.get("location");
+        await response.body?.cancel();
+
+        return nextLocation
+          ? new URL(nextLocation, uploadUrl).toString()
+          : uploadUrl;
+      }
+
+      const body = await readBody(response);
+      if (response.status === 416 && attempt > 0) {
+        const status = await fetch(uploadUrl, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const range = status.headers.get("range") ?? "";
+        const nextLocation = status.headers.get("location");
+        await status.body?.cancel();
+        if (status.ok || status.status === 204) {
+          const rangeEnd = Number.parseInt(range.split("-").at(-1) ?? "", 10);
+          if (rangeEnd === end) {
+            return nextLocation
+              ? new URL(nextLocation, uploadUrl).toString()
+              : uploadUrl;
+          }
+        }
+      }
+
+      if (RETRYABLE_STATUSES.has(response.status) && attempt < MAX_RETRIES) {
+        await sleep(parseRetryDelayMs(response, body, attempt));
+
+        continue;
+      }
+
+      throw new Error(
+        `failed to upload blob chunk ${offset}-${end} to ${uploadUrl} (${response.status}): ${body}`,
+      );
+    }
+  }
+
+  async #completeUploadSession(
+    uploadUrl: string,
+    pushToken: TokenProvider,
+    repository: string,
+    digest: string,
+  ): Promise<void> {
+    const finalUrl = new URL(uploadUrl);
+    finalUrl.searchParams.set("digest", digest);
+
+    const response = await this.#fetchWithRetry(
+      finalUrl.toString(),
+      async () => ({
+        method: "PUT",
+        headers: {
+          "Authorization": `Bearer ${await resolveToken(pushToken)}`,
+          "Content-Length": "0",
+        },
+      }),
+    );
+    if (response.status === 201 || response.ok) {
+      await response.body?.cancel();
+
+      return;
+    }
+
+    throw new Error(
+      `failed to finalize blob ${digest} in ${repository} (${response.status}): ${await readBody(response)}`,
+    );
+  }
+
+  async #cancelUploadSession(
+    uploadUrl: string,
+    pushToken: TokenProvider,
+  ): Promise<void> {
+    try {
+      const response = await fetch(uploadUrl, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${await resolveToken(pushToken)}` },
+      });
+      await response.body?.cancel();
+    } catch {
+      // Best-effort cleanup of abandoned upload session.
+    }
+  }
+
   async #putBlob(
     repository: string,
-    pushToken: string,
+    pushToken: TokenProvider,
     digest: string,
     payload: Uint8Array,
   ): Promise<void> {
@@ -225,40 +405,26 @@ export class OciClient {
       return;
     }
 
-    const startUrl = `${this.#registryUrl}/v2/${repository}/blobs/uploads/`;
     for (let attempt = 0; ; attempt += 1) {
-      const start = await this.#fetchWithRetry(startUrl, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${pushToken}`,
-          "Content-Length": "0",
-        },
-      });
-      if (start.status !== 202 && !start.ok) {
-        throw new Error(
-          `failed to initiate blob upload to ${startUrl} (${start.status}): ${await readBody(start)}`,
-        );
-      }
+      const { uploadUrl } = await this.#startUploadSession(
+        repository,
+        pushToken,
+      );
+      const finalUrl = new URL(uploadUrl);
+      finalUrl.searchParams.set("digest", digest);
 
-      const location = start.headers.get("location");
-      if (!location) {
-        throw new Error(
-          `blob upload response from ${startUrl} missing Location`,
-        );
-      }
-
-      const uploadUrl = new URL(location, this.#registryUrl);
-      uploadUrl.searchParams.set("digest", digest);
-
-      const put = await fetch(uploadUrl.toString(), {
+      const put = await fetch(finalUrl.toString(), {
         method: "PUT",
         headers: {
-          "Authorization": `Bearer ${pushToken}`,
+          "Authorization": `Bearer ${await resolveToken(pushToken)}`,
           "Content-Type": "application/octet-stream",
+          "Content-Length": String(payload.byteLength),
         },
         body: payload as BodyInit,
       });
       if (put.status === 201 || put.ok) {
+        await put.body?.cancel();
+
         return;
       }
 
@@ -277,7 +443,7 @@ export class OciClient {
 
   async #ensureEmptyConfig(
     repository: string,
-    pushToken: string,
+    pushToken: TokenProvider,
   ): Promise<void> {
     let pending = this.#ensuredConfigRepos.get(repository);
     if (!pending) {
@@ -296,17 +462,13 @@ export class OciClient {
     await pending;
   }
 
-  public async uploadNarBlob(
+  async #putManifest(
     repository: string,
-    pushToken: string,
-    payload: Uint8Array,
-    blobDigestHex: string,
+    pushToken: TokenProvider,
+    lowerHex: string,
+    fileSize: number,
   ): Promise<string> {
-    const lowerHex = blobDigestHex.toLowerCase();
     const blobDigest = `sha256:${lowerHex}`;
-    await this.#ensureEmptyConfig(repository, pushToken);
-    await this.#putBlob(repository, pushToken, blobDigest, payload);
-
     const manifestBytes = encoder.encode(
       JSON.stringify({
         schemaVersion: 2,
@@ -320,21 +482,21 @@ export class OciClient {
           {
             mediaType: NAR_LAYER_MEDIA_TYPE,
             digest: blobDigest,
-            size: payload.length,
+            size: fileSize,
           },
         ],
       }),
     );
 
     const manifestUrl = `${this.#registryUrl}/v2/${repository}/manifests/nar-${lowerHex.slice(0, 32)}`;
-    const response = await this.#fetchWithRetry(manifestUrl, {
+    const response = await this.#fetchWithRetry(manifestUrl, async () => ({
       method: "PUT",
       headers: {
-        "Authorization": `Bearer ${pushToken}`,
+        "Authorization": `Bearer ${await resolveToken(pushToken)}`,
         "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
       },
       body: manifestBytes,
-    });
+    }));
     if (!response.ok) {
       throw new Error(
         `failed to push manifest to ${manifestUrl} (${response.status}): ${await readBody(response)}`,
@@ -342,10 +504,129 @@ export class OciClient {
     }
 
     const digestHeader = response.headers.get("docker-content-digest");
+    await response.body?.cancel();
     if (digestHeader) {
       return digestHeader;
     }
 
     return `sha256:${encodeHex(new Uint8Array(await crypto.subtle.digest("SHA-256", manifestBytes)))}`;
+  }
+
+  public async uploadNarBlob(
+    repository: string,
+    pushToken: TokenProvider,
+    payload: Uint8Array,
+    blobDigestHex: string,
+  ): Promise<string> {
+    const lowerHex = blobDigestHex.toLowerCase();
+    const blobDigest = `sha256:${lowerHex}`;
+    await this.#ensureEmptyConfig(repository, pushToken);
+    await this.#putBlob(repository, pushToken, blobDigest, payload);
+
+    return this.#putManifest(
+      repository,
+      pushToken,
+      lowerHex,
+      payload.byteLength,
+    );
+  }
+
+  public async uploadNarStream(
+    repository: string,
+    pushToken: TokenProvider,
+    chunks: AsyncIterable<Uint8Array>,
+    getDigestHex: () => string,
+    chunkSize: number = DEFAULT_UPLOAD_CHUNK_SIZE,
+  ): Promise<{ manifestDigest: string; fileSize: number }> {
+    const pending: Uint8Array[] = [];
+    let pendingBytes = 0;
+    let sessionUrl: string | null = null;
+    let effectiveChunkSize = Math.max(1, chunkSize);
+    let offset = 0;
+
+    try {
+      for await (const piece of chunks) {
+        if (piece.byteLength === 0) {
+          continue;
+        }
+        pending.push(piece);
+        pendingBytes += piece.byteLength;
+
+        while (pendingBytes >= effectiveChunkSize) {
+          if (sessionUrl === null) {
+            const started = await this.#startUploadSession(
+              repository,
+              pushToken,
+            );
+            sessionUrl = started.uploadUrl;
+            if (started.minChunkSize > effectiveChunkSize) {
+              effectiveChunkSize = Math.min(
+                started.minChunkSize,
+                MAX_UPLOAD_CHUNK_SIZE,
+              );
+              if (pendingBytes < effectiveChunkSize) {
+                break;
+              }
+            }
+          }
+
+          const chunk = takeBytes(pending, effectiveChunkSize);
+          pendingBytes -= chunk.byteLength;
+          sessionUrl = await this.#patchChunk(
+            sessionUrl,
+            pushToken,
+            chunk,
+            offset,
+          );
+          offset += chunk.byteLength;
+        }
+      }
+
+      const lowerHex = getDigestHex().toLowerCase();
+      const blobDigest = `sha256:${lowerHex}`;
+      const fileSize = offset + pendingBytes;
+
+      await this.#ensureEmptyConfig(repository, pushToken);
+
+      if (sessionUrl === null) {
+        const payload = takeBytes(pending, pendingBytes);
+        pendingBytes = 0;
+        await this.#putBlob(repository, pushToken, blobDigest, payload);
+      } else {
+        if (pendingBytes > 0) {
+          const tail = takeBytes(pending, pendingBytes);
+          pendingBytes = 0;
+          sessionUrl = await this.#patchChunk(
+            sessionUrl,
+            pushToken,
+            tail,
+            offset,
+          );
+          offset += tail.byteLength;
+        }
+        await this.#completeUploadSession(
+          sessionUrl,
+          pushToken,
+          repository,
+          blobDigest,
+        );
+        sessionUrl = null;
+      }
+
+      const manifestDigest = await this.#putManifest(
+        repository,
+        pushToken,
+        lowerHex,
+        fileSize,
+      );
+
+      return { manifestDigest, fileSize };
+    } catch (error) {
+      if (sessionUrl !== null) {
+        await this.#cancelUploadSession(sessionUrl, pushToken);
+      }
+
+      throw error;
+    }
   }
 }
