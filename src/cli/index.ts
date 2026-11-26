@@ -3,7 +3,7 @@ import fs from "node:fs";
 
 import { completionsPlugin } from "@clerc/plugin-completions";
 import type { Logger, Theme } from "clerc";
-import { Types, clerc } from "clerc";
+import { ClercError, Complete, Types, clerc } from "clerc";
 
 import manifest from "../../package.json" with { type: "json" };
 import { runDatabaseMigrations, startNodeServer } from "../entry/node.ts";
@@ -31,7 +31,6 @@ import {
 import { runPush } from "./push.ts";
 
 const nonEmptyString = Types.String({ trim: true, nonEmpty: true });
-const completeFiles = () => ({ files: true }) as const;
 
 const serverFlag = {
   type: nonEmptyString,
@@ -142,7 +141,7 @@ cache.command("push [paths...]", {
   args: {
     paths: {
       description: "Nix store paths or symlinks to push",
-      complete: completeFiles,
+      complete: Complete.file(),
     },
   },
   flags: {
@@ -175,6 +174,12 @@ cache.command("push [paths...]", {
       multiple: true,
       unique: true,
       default: ["cache.nixos.org-1:"],
+      complete: Complete.list([
+        {
+          value: "cache.nixos.org-1:",
+          description: "Official NixOS binary cache",
+        },
+      ]),
       description: "Signature key prefix to skip (repeatable)",
     },
     jobs: {
@@ -195,7 +200,12 @@ cache.command("push [paths...]", {
     r.exclusive(r.flag("includeUpstream"), r.flag("skipSignedBy")),
   ],
   async run(ctx) {
-    await runPush({ ...ctx.flags, ...ctx.args, log: ctx.log });
+    await runPush({
+      ...ctx.flags,
+      ...ctx.args,
+      readStdin: ctx.terminal.readStdin,
+      log: ctx.log,
+    });
   },
 });
 
@@ -212,14 +222,14 @@ cache.command("keygen <name>", {
       type: nonEmptyString,
       placeholder: "<path>",
       short: "s",
-      complete: completeFiles,
+      complete: Complete.file(),
       description: "Write secret key to file (mode 0600)",
     },
     publicOut: {
       type: nonEmptyString,
       placeholder: "<path>",
       short: "p",
-      complete: completeFiles,
+      complete: Complete.file(),
       description: "Write public key to file",
     },
   },
@@ -266,10 +276,21 @@ const admin = cli
         const response = await fetch(url, {
           method,
           headers: { Authorization: `Bearer ${token}` },
+          signal: ctx.signal,
         });
         if (!response.ok) {
-          throw new Error(
-            `admin request ${method} ${url} failed (${response.status}): ${await readBody(response)}`,
+          throw new ClercError(
+            `Admin request ${method} ${apiPath} failed (${response.status})`,
+            {
+              code: "ERR_ADMIN_REQUEST",
+              detail: await readBody(response),
+              hints:
+                response.status === 401 || response.status === 403
+                  ? [
+                      "Check --token / FIRN_ADMIN_TOKEN against the server's ADMIN_TOKEN",
+                    ]
+                  : [`Verify the Firn server is reachable at ${baseUrl}`],
+            },
           );
         }
 
@@ -391,6 +412,9 @@ adminJson.command("ls", {
       type: nonEmptyString,
       placeholder: "<scope>",
       group: "filter",
+      complete: Complete.list([
+        { value: "main", description: "Main branch cache" },
+      ]),
       description: "Filter by scope (main or pr:<owner>:<repo>:<n>)",
     },
     query: {
@@ -601,7 +625,9 @@ adminJson.command("gc", {
   },
   async run(ctx) {
     const { theme } = ctx.log;
-    const spinner = ctx.flags.json ? null : ctx.log.spinner();
+    const spinner = ctx.flags.json
+      ? null
+      : ctx.log.spinner({ signal: ctx.signal });
     spinner?.start(
       ctx.flags.dryRun
         ? "Running garbage collection dry-run..."
@@ -682,7 +708,7 @@ const server = cli.scope({ group: "server" }).flags({
     env: "FIRN_DB_PATH",
     default: "./firn.db",
     group: "database",
-    complete: completeFiles,
+    complete: Complete.file(),
     description: "Local SQLite database path",
   },
   libsqlUrl: {
@@ -727,15 +753,27 @@ server.command("serve", {
       env: { ...ctx.terminal.env },
     });
 
-    function shutdown(signal: string) {
-      ctx.terminal.stdout(
-        JSON.stringify({ message: "shutting down firn server", signal }),
-      );
-      void running.close().finally(() => process.exit(0));
+    const { signal } = ctx;
+    if (!signal) {
+      return;
     }
 
-    process.once("SIGINT", () => shutdown("SIGINT"));
-    process.once("SIGTERM", () => shutdown("SIGTERM"));
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve();
+      } else {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      }
+    });
+
+    ctx.terminal.stdout(
+      JSON.stringify({
+        message: "shutting down firn server",
+        reason:
+          signal.reason instanceof Error ? signal.reason.message : "aborted",
+      }),
+    );
+    await running.close();
   },
 });
 

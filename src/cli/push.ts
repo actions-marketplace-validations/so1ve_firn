@@ -1,13 +1,12 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import readline from "node:readline";
 import { Transform } from "node:stream";
 import { promisify } from "node:util";
 import { constants as zlibConstants, createZstdCompress } from "node:zlib";
 
 import type { Logger } from "clerc";
-import { createLogger } from "clerc";
+import { ClercError, createLogger } from "clerc";
 
 import { readBody, stripTrailingSlash } from "../shared/format.ts";
 import {
@@ -41,6 +40,7 @@ export interface PushOptions {
   jobs: number;
   zstdLevel: number;
   paths: string[];
+  readStdin?: () => Promise<string>;
   log?: Logger;
 }
 
@@ -108,11 +108,24 @@ export function parseNixPathInfoJson(raw: string): NixPathInfo[] {
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
+async function readProcessStdin(): Promise<string> {
+  if (process.stdin.readableEnded) {
+    return "";
+  }
+  process.stdin.setEncoding("utf8");
+  let content = "";
+  for await (const chunk of process.stdin) {
+    content += String(chunk);
+  }
+
+  return content;
+}
+
 async function collectInputPaths(options: PushOptions): Promise<string[]> {
   const raw = [...options.paths];
   if (options.stdin) {
-    const rl = readline.createInterface({ input: process.stdin });
-    for await (const line of rl) {
+    const input = await (options.readStdin ?? readProcessStdin)();
+    for (const line of input.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (trimmed) {
         raw.push(trimmed);
@@ -150,14 +163,24 @@ function resolveAuth(serverUrl: string, options: PushOptions): AuthMode {
   const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
   const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   if (!requestUrl || !requestToken) {
-    throw new Error(
-      "no authentication credentials found: pass --token / FIRN_TOKEN for manual push, or run in GitHub Actions with `id-token: write`",
-    );
+    throw new ClercError("No authentication credentials found", {
+      code: "ERR_MISSING_AUTH",
+      hints: [
+        "Pass --token / FIRN_TOKEN for manual pushes",
+        "Or run in GitHub Actions with `permissions: { id-token: write, packages: write }`",
+      ],
+    });
   }
   const githubToken = process.env.GITHUB_TOKEN;
   if (!githubToken) {
-    throw new Error(
-      "GITHUB_TOKEN (with packages: write) is required for GitHub Actions OIDC push",
+    throw new ClercError(
+      "GITHUB_TOKEN is required for GitHub Actions OIDC push",
+      {
+        code: "ERR_MISSING_AUTH",
+        hints: [
+          "Expose GITHUB_TOKEN with `packages: write` permission in the workflow step",
+        ],
+      },
     );
   }
 

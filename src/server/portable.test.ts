@@ -446,28 +446,37 @@ describe("portable Firn server & database adapters", () => {
       const publicPath = path.join(tmpDir, "public.key");
       const dbPath = path.join(tmpDir, "cli.db");
 
-      const [versionOut, helpOut, prHelpOut, zshComp, keygenOut, migrateOut] =
-        await Promise.all([
-          execFileAsync(process.execPath, [CLI_ENTRY, "--version"]),
-          execFileAsync(process.execPath, [CLI_ENTRY, "--help"]),
-          execFileAsync(process.execPath, [CLI_ENTRY, "pr"]),
-          execFileAsync(process.execPath, [CLI_ENTRY, "completions", "zsh"]),
-          execFileAsync(process.execPath, [
-            CLI_ENTRY,
-            "keygen",
-            "cache.cli-test-1",
-            "-s",
-            secretPath,
-            "-p",
-            publicPath,
-          ]),
-          execFileAsync(process.execPath, [
-            CLI_ENTRY,
-            "migrate",
-            "--db",
-            dbPath,
-          ]),
-        ]);
+      const [
+        versionOut,
+        helpOut,
+        prHelpOut,
+        zshComp,
+        compInstallDryRun,
+        keygenOut,
+        migrateOut,
+      ] = await Promise.all([
+        execFileAsync(process.execPath, [CLI_ENTRY, "--version"]),
+        execFileAsync(process.execPath, [CLI_ENTRY, "--help"]),
+        execFileAsync(process.execPath, [CLI_ENTRY, "pr"]),
+        execFileAsync(process.execPath, [CLI_ENTRY, "completions", "zsh"]),
+        execFileAsync(process.execPath, [
+          CLI_ENTRY,
+          "completions",
+          "install",
+          "zsh",
+          "--dry-run",
+        ]),
+        execFileAsync(process.execPath, [
+          CLI_ENTRY,
+          "keygen",
+          "cache.cli-test-1",
+          "-s",
+          secretPath,
+          "-p",
+          publicPath,
+        ]),
+        execFileAsync(process.execPath, [CLI_ENTRY, "migrate", "--db", dbPath]),
+      ]);
 
       expect(versionOut.stdout.trim()).toBe(`firn v${manifest.version}`);
       expect(helpOut.stdout).toContain("CACHE");
@@ -477,6 +486,10 @@ describe("portable Firn server & database adapters", () => {
       expect(prHelpOut.stdout).toContain("ls");
       expect(prHelpOut.stdout).toContain("rm");
       expect(zshComp.stdout).toContain("#compdef firn");
+      expect(zshComp.stdout).toContain("_files");
+      expect(compInstallDryRun.stdout).toContain(
+        "Dry run: would install zsh completions",
+      );
       expect(keygenOut.stdout).toContain("cache.cli-test-1");
       expect(fs.readFileSync(publicPath, "utf8").trim()).toMatch(
         /^cache\.cli-test-1:/,
