@@ -1,6 +1,9 @@
 node_modules/
 .wrangler/
 .dev.vars
+wrangler.local.json
+wrangler.local.jsonc
+wrangler.local.toml
 wrangler.prod.jsonc
 .devenv/
 .direnv/

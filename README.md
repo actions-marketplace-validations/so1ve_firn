@@ -28,15 +28,43 @@ and include `inputs.firn.packages.${system}.default` in `environment.systemPacka
 
 ## Deploy (Cloudflare Workers + D1)
 
-### One-click deploy
+Keep [wrangler.jsonc](wrangler.jsonc) unmodified so upstream binding and routing
+updates merge cleanly. Instance-specific values (`database_id`, custom domains,
+`PUBLIC_BASE_URL`, `OWNERS_JSON`) live in GitHub repository variables,
+Cloudflare dashboard variables (preserved via `keep_vars: true`), or a
+gitignored `wrangler.local.jsonc`.
+
+### Fork + GitHub Actions (Recommended)
+
+1. Fork this repository on GitHub and create a D1 database (`firn`) in your
+   Cloudflare account.
+2. Add **Repository Secrets** in your fork: `CLOUDFLARE_API_TOKEN` (Workers
+   Scripts, D1, and Account Settings edit permissions) and
+   `CLOUDFLARE_ACCOUNT_ID`.
+3. Add **Repository Variables** in your fork:
+   - `FIRN_DEPLOY` = `true`
+   - `FIRN_D1_DATABASE_ID` = `<your-d1-database-id>`
+   - Optional: `FIRN_CUSTOM_DOMAIN` (e.g. `cache.example.com`),
+     `FIRN_PUBLIC_BASE_URL`, `FIRN_OWNERS_JSON`, `FIRN_GITHUB_APP_ID`,
+     `FIRN_GC_PR_TTL_DAYS`, `FIRN_GC_MAIN_LRU_DAYS`,
+     `FIRN_GC_MAX_SUBREQUESTS`, `FIRN_WORKER_NAME`, `FIRN_D1_DATABASE_NAME`
+4. Run the **Deploy Worker** workflow once (or push to `main`).
+5. Configure the secrets below in the Cloudflare dashboard or via
+   `wrangler secret put`.
+
+To stay up to date in a fork or one-click clone, use **Sync fork** on GitHub or
+run the **Sync Upstream** workflow (choosing `latest-release` or `main`).
+
+### One-click deploy (Cloudflare Workers Builds)
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/so1ve/firn)
 
-Cloudflare automatically provisions the D1 database (`DB`), applies
-`migrations/`, and deploys the Worker. After deploying, set the
-variables and secrets below in the Cloudflare dashboard (or via Wrangler).
+Cloudflare automatically provisions the D1 database (`DB`) and deploys the
+Worker. After the first deploy, set the variables and secrets below in the
+Cloudflare dashboard and set the Workers Builds deploy command to
+`pnpm run deploy` so future builds apply `migrations/` automatically.
 
-### Manual deploy
+### Local CLI deploy (`wrangler.local.jsonc`)
 
 #### 1. Generate signing keys
 
@@ -48,13 +76,24 @@ firn keygen cache.example.com-1 -s main.key -p main.pub
 firn keygen cache.example.com-pr-1 -s pr.key -p pr.pub
 ```
 
-#### 2. Configure `wrangler.jsonc` and create D1
-
-Create the D1 database and update `database_id`, `routes`, and `vars` in
-[wrangler.jsonc](wrangler.jsonc):
+#### 2. Create D1 and `wrangler.local.jsonc`
 
 ```sh
 pnpm exec wrangler d1 create firn
+```
+
+Create a gitignored `wrangler.local.jsonc` containing only your instance
+overrides:
+
+```jsonc
+{
+  "d1_databases": [{ "binding": "DB", "database_id": "<your-d1-database-id>" }],
+  "routes": [{ "pattern": "cache.example.com", "custom_domain": true }],
+  "vars": {
+    "PUBLIC_BASE_URL": "https://cache.example.com",
+    "OWNERS_JSON": "[...]",
+  },
+}
 ```
 
 Environment variables (`vars`):

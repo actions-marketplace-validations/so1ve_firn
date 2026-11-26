@@ -4,6 +4,7 @@
   "main": "src/entry/cloudflare.ts",
   "compatibility_date": "2026-11-22",
   "compatibility_flags": ["nodejs_compat"],
+  "keep_vars": true,
   "observability": {
     "enabled": true,
     "logs": {
@@ -27,13 +28,5 @@
       "database_name": "firn",
       "migrations_dir": "migrations"
     }
-  ],
-  "vars": {
-    "PUBLIC_BASE_URL": "https://cache.example.com",
-    "GC_PR_TTL_DAYS": "3",
-    "GC_MAIN_LRU_DAYS": "15",
-    "GC_MAX_SUBREQUESTS": "40",
-    "GITHUB_APP_ID": "",
-    "OWNERS_JSON": "[]"
-  }
+  ]
 }
