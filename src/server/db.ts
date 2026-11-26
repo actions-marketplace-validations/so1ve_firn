@@ -168,7 +168,11 @@ export async function commitEntries(
                 manifest_digest = excluded.manifest_digest,
                 file_size = excluded.file_size,
                 gc_blocked = 0,
-                gc_block_reason = NULL`,
+                gc_block_reason = NULL
+              WHERE manifest_digest != excluded.manifest_digest
+                 OR file_size != excluded.file_size
+                 OR gc_blocked != 0
+                 OR gc_block_reason IS NOT NULL`,
         params: [
           r.ownerId,
           r.ghcrPackage,
@@ -221,7 +225,8 @@ export async function commitEntries(
         sql: `INSERT INTO pr_scopes (owner_id, repo, pr_number, updated_at)
               VALUES (?1, ?2, ?3, ?4)
               ON CONFLICT(owner_id, repo, pr_number) DO UPDATE SET
-                updated_at = excluded.updated_at`,
+                updated_at = excluded.updated_at
+              WHERE updated_at < excluded.updated_at`,
         params: [r.ownerId, r.prInfo.repo, r.prInfo.number, r.now],
       });
     }
@@ -323,28 +328,42 @@ export async function evictExpiredPrScopes(
   cutoffTs: number,
   dryRun: boolean,
 ): Promise<number> {
-  const expiredScopesSql = `SELECT ${PR_SCOPE_EXPR} FROM pr_scopes WHERE updated_at < ?1`;
-  if (dryRun) {
-    const row = await db.first<{ count: number }>(
-      `SELECT COUNT(*) AS count FROM store_paths WHERE scope IN (${expiredScopesSql})`,
-      [cutoffTs],
-    );
-
-    return row?.count ?? 0;
+  const expired = await db.all<{ scope: string }>(
+    `SELECT ${PR_SCOPE_EXPR} AS scope FROM pr_scopes WHERE updated_at < ?1`,
+    [cutoffTs],
+  );
+  if (expired.length === 0) {
+    return 0;
   }
 
-  const [pathsRes] = await db.batch([
-    {
-      sql: `DELETE FROM store_paths WHERE scope IN (${expiredScopesSql})`,
-      params: [cutoffTs],
-    },
-    {
-      sql: "DELETE FROM pr_scopes WHERE updated_at < ?1",
-      params: [cutoffTs],
-    },
-  ]);
+  const scopes = expired.map((row) => row.scope);
+  if (dryRun) {
+    let total = 0;
+    for (const chunk of chunks(scopes)) {
+      const row = await db.first<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM store_paths WHERE scope IN (${placeholders(chunk.length)})`,
+        chunk,
+      );
+      total += row?.count ?? 0;
+    }
 
-  return pathsRes?.changes ?? 0;
+    return total;
+  }
+
+  const statements: SqlStatement[] = chunks(scopes).map((chunk) => ({
+    sql: `DELETE FROM store_paths WHERE scope IN (${placeholders(chunk.length)})`,
+    params: chunk,
+  }));
+  statements.push({
+    sql: "DELETE FROM pr_scopes WHERE updated_at < ?1",
+    params: [cutoffTs],
+  });
+
+  const results = await db.batch(statements);
+
+  return results
+    .slice(0, -1)
+    .reduce((sum, res) => sum + (res?.changes ?? 0), 0);
 }
 
 export async function evictStaleMainPaths(
@@ -486,7 +505,8 @@ export async function markBlobGcBlocked(
   reason: string,
 ): Promise<void> {
   await db.run(
-    "UPDATE blobs SET gc_blocked = 1, gc_block_reason = ?2 WHERE id = ?1",
+    `UPDATE blobs SET gc_blocked = 1, gc_block_reason = ?2
+     WHERE id = ?1 AND (gc_blocked != 1 OR gc_block_reason IS NOT ?2)`,
     [blobId, reason],
   );
 }

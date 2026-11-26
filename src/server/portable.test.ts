@@ -12,7 +12,7 @@ import type { NixPathInfo } from "../cli/push.ts";
 import { groupByDependencyOrder } from "../cli/push.ts";
 import { resolveEnvWithFiles, startNodeServer } from "../entry/node.ts";
 import { createWebApp } from "../entry/web.ts";
-import { MAIN_SCOPE } from "../shared/format.ts";
+import { MAIN_SCOPE, prScope } from "../shared/format.ts";
 import { SigningKeyPair, unixNow } from "../shared/nix-format.ts";
 import { OciClient } from "../shared/oci.ts";
 import { createApp } from "./app.ts";
@@ -29,10 +29,12 @@ import {
   commitEntries,
   deleteBlobIfUnreferenced,
   deleteStorePaths,
+  evictExpiredPrScopes,
   evictStaleMainPaths,
   getNarInfo,
   listStorePaths,
   listUnreferencedBlobs,
+  markBlobGcBlocked,
 } from "./db.ts";
 
 const execFileAsync = promisify(execFile);
@@ -948,5 +950,121 @@ describe("portable Firn server & database adapters", () => {
 
     expect(flatHashes[0]).toBe("1500".padStart(32, "0"));
     expect(flatHashes.at(-1)).toBe("1".padStart(32, "0"));
+  });
+
+  it("skips no-op D1 writes for unchanged blobs, pr_scopes, gc_blocked, and non-expired PR eviction", async () => {
+    const db = openNodeSqlite(":memory:");
+    try {
+      await applyMigrations(db);
+
+      const batchResults: number[][] = [];
+      const runChanges: number[] = [];
+      let writeCalls = 0;
+      const trackedDb: typeof db = {
+        first: (...args) => db.first(...args),
+        all: (...args) => db.all(...args),
+        async run(...args) {
+          writeCalls += 1;
+          const res = await db.run(...args);
+          runChanges.push(res.changes);
+
+          return res;
+        },
+        async batch(stmts) {
+          writeCalls += 1;
+          const res = await db.batch(stmts);
+          batchResults.push(res.map((r) => r.changes));
+
+          return res;
+        },
+        close: () => db.close(),
+      };
+
+      const zeroHash =
+        "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73";
+      const scope = prScope("so1ve", "demo", 7);
+      const baseRecord = {
+        ownerId: "so1ve",
+        scope,
+        prInfo: { repo: "demo", number: 7 },
+        ghcrPackage: "demo-cache",
+        manifestDigest: `sha256:${"a".repeat(64)}`,
+        blobDigest: "b".repeat(64),
+        fileSize: 1024,
+        narHash: zeroHash,
+        narSize: 2048,
+        fileHash: zeroHash,
+        deriver: null,
+        references: [],
+        signature: "cache.local-pr-1:sig",
+        now: 1000,
+      };
+
+      // Initial commit inserts blob, store_path, and pr_scope.
+      await commitEntries(trackedDb, [
+        {
+          ...baseRecord,
+          storeHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          storePath: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-first",
+        },
+      ]);
+
+      expect(batchResults.at(-1)).toEqual([1, 1, 1]);
+
+      // Second store path sharing the exact same blob at the same timestamp skips both blob and pr_scope writes.
+      await commitEntries(trackedDb, [
+        {
+          ...baseRecord,
+          storeHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          storePath: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-second",
+        },
+      ]);
+
+      expect(batchResults.at(-1)).toEqual([0, 1, 0]);
+
+      // markBlobGcBlocked skips duplicate writes with identical reason, updates when reason changes.
+      const blobRow = await db.first<{ id: number }>("SELECT id FROM blobs");
+      await markBlobGcBlocked(trackedDb, blobRow!.id, "5000 downloads");
+      await markBlobGcBlocked(trackedDb, blobRow!.id, "5000 downloads");
+      await markBlobGcBlocked(trackedDb, blobRow!.id, "new reason");
+
+      expect(runChanges).toEqual([1, 0, 1]);
+
+      // Re-committing clears gc_blocked on the blob.
+      await commitEntries(trackedDb, [
+        {
+          ...baseRecord,
+          storeHash: "cccccccccccccccccccccccccccccccc",
+          storePath: "/nix/store/cccccccccccccccccccccccccccccccc-third",
+          now: 1005,
+        },
+      ]);
+
+      expect(batchResults.at(-1)).toEqual([1, 1, 1]);
+
+      // evictExpiredPrScopes performs zero writes when nothing is expired.
+      const writesBefore = writeCalls;
+
+      await expect(evictExpiredPrScopes(trackedDb, 500, false)).resolves.toBe(
+        0,
+      );
+      expect(writeCalls).toBe(writesBefore);
+
+      // Dry-run and actual eviction on expired PR scope.
+      await expect(evictExpiredPrScopes(trackedDb, 2000, true)).resolves.toBe(
+        3,
+      );
+      expect(writeCalls).toBe(writesBefore);
+
+      await expect(evictExpiredPrScopes(trackedDb, 2000, false)).resolves.toBe(
+        3,
+      );
+      expect(writeCalls).toBe(writesBefore + 1);
+      await expect(evictExpiredPrScopes(trackedDb, 2000, false)).resolves.toBe(
+        0,
+      );
+    } finally {
+      db.close();
+    }
   });
 });
