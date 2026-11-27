@@ -14,8 +14,9 @@ const MAX_RETRIES = 6;
 const BASE_RETRY_DELAY_MS = 200;
 const MAX_RETRY_DELAY_MS = 15_000;
 
-export const DEFAULT_UPLOAD_CHUNK_SIZE = 16 * 1024 * 1024;
+export const DEFAULT_UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024;
 
+const MIN_ADAPTIVE_CHUNK_SIZE = 256 * 1024;
 const MAX_UPLOAD_CHUNK_SIZE = 128 * 1024 * 1024;
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const RETRY_UNIT_MS: Record<string, number> = {
@@ -98,6 +99,8 @@ function parseRetryDelayMs(
     MAX_RETRY_DELAY_MS,
   );
 }
+
+class ChunkTooLargeError extends Error {}
 
 export class OciHttpError extends Error {
   public readonly status: number;
@@ -320,6 +323,14 @@ export class OciClient {
       }
 
       const body = await readBody(response);
+      if (
+        response.status === 413 ||
+        (response.status === 416 && /too large|exceeds/i.test(body))
+      ) {
+        throw new ChunkTooLargeError(
+          `failed to upload blob chunk ${offset}-${end} to ${uploadUrl} (${response.status}): ${body}`,
+        );
+      }
       if (response.status === 416 && attempt > 0) {
         const status = await fetch(uploadUrl, {
           method: "GET",
@@ -531,6 +542,68 @@ export class OciClient {
     );
   }
 
+  async #flushPendingChunks(
+    repository: string,
+    pushToken: TokenProvider,
+    state: {
+      pending: Uint8Array[];
+      pendingBytes: number;
+      sessionUrl: string | null;
+      effectiveChunkSize: number;
+      offset: number;
+    },
+    flushAll: boolean,
+  ): Promise<void> {
+    while (
+      flushAll
+        ? state.pendingBytes > 0
+        : state.pendingBytes >= state.effectiveChunkSize
+    ) {
+      if (state.sessionUrl === null) {
+        const started = await this.#startUploadSession(repository, pushToken);
+        state.sessionUrl = started.uploadUrl;
+        if (started.minChunkSize > state.effectiveChunkSize) {
+          state.effectiveChunkSize = Math.min(
+            started.minChunkSize,
+            MAX_UPLOAD_CHUNK_SIZE,
+          );
+          if (!flushAll && state.pendingBytes < state.effectiveChunkSize) {
+            break;
+          }
+        }
+      }
+
+      const size = Math.min(state.pendingBytes, state.effectiveChunkSize);
+      const chunk = takeBytes(state.pending, size);
+      state.pendingBytes -= chunk.byteLength;
+      try {
+        state.sessionUrl = await this.#patchChunk(
+          state.sessionUrl,
+          pushToken,
+          chunk,
+          state.offset,
+        );
+        state.offset += chunk.byteLength;
+      } catch (error) {
+        if (
+          error instanceof ChunkTooLargeError &&
+          chunk.byteLength > MIN_ADAPTIVE_CHUNK_SIZE
+        ) {
+          state.effectiveChunkSize = Math.max(
+            MIN_ADAPTIVE_CHUNK_SIZE,
+            Math.floor(chunk.byteLength / 2),
+          );
+          state.pending.unshift(chunk);
+          state.pendingBytes += chunk.byteLength;
+
+          continue;
+        }
+
+        throw error;
+      }
+    }
+  }
+
   public async uploadNarStream(
     repository: string,
     pushToken: TokenProvider,
@@ -538,79 +611,43 @@ export class OciClient {
     getDigestHex: () => string,
     chunkSize: number = DEFAULT_UPLOAD_CHUNK_SIZE,
   ): Promise<{ manifestDigest: string; fileSize: number }> {
-    const pending: Uint8Array[] = [];
-    let pendingBytes = 0;
-    let sessionUrl: string | null = null;
-    let effectiveChunkSize = Math.max(1, chunkSize);
-    let offset = 0;
+    const state = {
+      pending: [] as Uint8Array[],
+      pendingBytes: 0,
+      sessionUrl: null as string | null,
+      effectiveChunkSize: Math.max(1, chunkSize),
+      offset: 0,
+    };
 
     try {
       for await (const piece of chunks) {
         if (piece.byteLength === 0) {
           continue;
         }
-        pending.push(piece);
-        pendingBytes += piece.byteLength;
-
-        while (pendingBytes >= effectiveChunkSize) {
-          if (sessionUrl === null) {
-            const started = await this.#startUploadSession(
-              repository,
-              pushToken,
-            );
-            sessionUrl = started.uploadUrl;
-            if (started.minChunkSize > effectiveChunkSize) {
-              effectiveChunkSize = Math.min(
-                started.minChunkSize,
-                MAX_UPLOAD_CHUNK_SIZE,
-              );
-              if (pendingBytes < effectiveChunkSize) {
-                break;
-              }
-            }
-          }
-
-          const chunk = takeBytes(pending, effectiveChunkSize);
-          pendingBytes -= chunk.byteLength;
-          sessionUrl = await this.#patchChunk(
-            sessionUrl,
-            pushToken,
-            chunk,
-            offset,
-          );
-          offset += chunk.byteLength;
-        }
+        state.pending.push(piece);
+        state.pendingBytes += piece.byteLength;
+        await this.#flushPendingChunks(repository, pushToken, state, false);
       }
 
       const lowerHex = getDigestHex().toLowerCase();
       const blobDigest = `sha256:${lowerHex}`;
-      const fileSize = offset + pendingBytes;
+      const fileSize = state.offset + state.pendingBytes;
 
       await this.#ensureEmptyConfig(repository, pushToken);
 
-      if (sessionUrl === null) {
-        const payload = takeBytes(pending, pendingBytes);
-        pendingBytes = 0;
+      if (state.sessionUrl === null) {
+        const payload = takeBytes(state.pending, state.pendingBytes);
+        state.pendingBytes = 0;
         await this.#putBlob(repository, pushToken, blobDigest, payload);
       } else {
-        if (pendingBytes > 0) {
-          const tail = takeBytes(pending, pendingBytes);
-          pendingBytes = 0;
-          sessionUrl = await this.#patchChunk(
-            sessionUrl,
-            pushToken,
-            tail,
-            offset,
-          );
-          offset += tail.byteLength;
-        }
+        await this.#flushPendingChunks(repository, pushToken, state, true);
         await this.#completeUploadSession(
-          sessionUrl,
+          state.sessionUrl,
           pushToken,
           repository,
           blobDigest,
         );
-        sessionUrl = null;
+        state.sessionUrl = null;
       }
 
       const manifestDigest = await this.#putManifest(
@@ -622,8 +659,8 @@ export class OciClient {
 
       return { manifestDigest, fileSize };
     } catch (error) {
-      if (sessionUrl !== null) {
-        await this.#cancelUploadSession(sessionUrl, pushToken);
+      if (state.sessionUrl !== null) {
+        await this.#cancelUploadSession(state.sessionUrl, pushToken);
       }
 
       throw error;

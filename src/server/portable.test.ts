@@ -14,7 +14,7 @@ import { resolveEnvWithFiles, startNodeServer } from "../entry/node.ts";
 import { createWebApp } from "../entry/web.ts";
 import { MAIN_SCOPE, prScope } from "../shared/format.ts";
 import { SigningKeyPair, unixNow } from "../shared/nix-format.ts";
-import { OciClient } from "../shared/oci.ts";
+import { DEFAULT_UPLOAD_CHUNK_SIZE, OciClient } from "../shared/oci.ts";
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { normalizeLibsqlHttpUrl, openLibsql } from "./db/libsql.ts";
@@ -886,6 +886,83 @@ describe("portable Firn server & database adapters", () => {
           "https://ghcr.mock/v2/so1ve/demo/blobs/uploads/abort-2",
         );
         expect(putCalled).toBeFalsy();
+      }
+
+      // 4. Default chunk size is 4 MiB (GHCR limit), and oversized PATCH 416 halves chunk size automatically.
+      {
+        expect(DEFAULT_UPLOAD_CHUNK_SIZE).toBe(4 * 1024 * 1024);
+
+        const limit = 512 * 1024;
+        const payload = Uint8Array.from(
+          { length: 1200 * 1024 },
+          (_, i) => i & 0xff,
+        );
+        const digestHex = sha256Hex(payload);
+        const receivedChunks: Uint8Array[] = [];
+        const acceptedRanges: string[] = [];
+
+        vi.stubGlobal(
+          "fetch",
+          async (input: RequestInfo | URL, init?: RequestInit) => {
+            const req = new Request(input, init);
+            const url = new URL(req.url);
+            if (req.method === "HEAD") {
+              return new Response(null, { status: 200 });
+            }
+            if (req.method === "POST") {
+              return new Response(null, {
+                status: 202,
+                headers: { Location: "/v2/so1ve/demo/blobs/uploads/adapt" },
+              });
+            }
+            if (req.method === "PATCH") {
+              const body = new Uint8Array(await req.arrayBuffer());
+              if (body.byteLength > limit) {
+                return new Response(
+                  'REQUESTED_RANGE_NOT_SATISFIABLE "the request body is too large and exceeds the maximum permissible limit of 4.00MiB"',
+                  { status: 416 },
+                );
+              }
+              receivedChunks.push(body);
+              acceptedRanges.push(req.headers.get("content-range")!);
+
+              return new Response(null, {
+                status: 202,
+                headers: { Location: "/v2/so1ve/demo/blobs/uploads/adapt" },
+              });
+            }
+            if (req.method === "PUT" && url.pathname.includes("/uploads/")) {
+              return new Response(null, { status: 201 });
+            }
+            if (req.method === "PUT" && url.pathname.includes("/manifests/")) {
+              return new Response(null, {
+                status: 201,
+                headers: {
+                  "docker-content-digest": `sha256:${"4".repeat(64)}`,
+                },
+              });
+            }
+
+            throw new Error(`unexpected ${req.method} ${req.url}`);
+          },
+        );
+
+        const oci = new OciClient("https://ghcr.mock");
+        const adapted = await oci.uploadNarStream(
+          "so1ve/demo",
+          "tok",
+          yieldSlices(payload, [600 * 1024]),
+          () => digestHex,
+          1024 * 1024,
+        );
+
+        expect(adapted.fileSize).toBe(payload.byteLength);
+        expect(acceptedRanges).toEqual([
+          "0-524287",
+          "524288-1048575",
+          "1048576-1228799",
+        ]);
+        expect(sha256Hex(Buffer.concat(receivedChunks))).toBe(digestHex);
       }
     } finally {
       vi.stubGlobal("fetch", originalFetch);
